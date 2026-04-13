@@ -1,0 +1,70 @@
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+  margin: 0;
+}
+
+html {
+  background: var(--app-bg-base);
+}
+
+body {
+  min-height: 100vh;
+  overflow: hidden;
+  background: var(--app-bg-base);
+  color: var(--app-text-primary);
+  font-family: var(--font-family-sans);
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+::selection {
+  background: rgba(143, 191, 159, 0.42);
+  color: var(--text-100);
+}
+
+#app {
+  position: relative;
+  isolation: isolate;
+}
+
+.page-title {
+  margin: 0;
+  font-size: clamp(2.5rem, 4vw, 4.5rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.page-subtitle {
+  color: var(--app-text-secondary);
+  font-size: 0.98rem;
+  line-height: 1.7;
+}
+
+.workspace-solid {
+  background: linear-gradient(180deg, rgba(255, 248, 237, 0.98) 0%, rgba(248, 240, 225, 0.98) 100%);
+}
+
+.surface-card {
+  background: var(--surface-card);
+}
