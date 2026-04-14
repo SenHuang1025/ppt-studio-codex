@@ -169,12 +169,12 @@ async def deliberate_plan_node(
 
 async def generate_outline_draft(state: ProjectState, *, model: Any) -> OutlineSchema:
     planning_context = build_planning_context(state)
-    response_text = await invoke_model_text(
-        model,
-        build_planner_draft_messages(planning_context=planning_context),
-    )
-
+    response_text = ""
     try:
+        response_text = await invoke_model_text(
+            model,
+            build_planner_draft_messages(planning_context=planning_context),
+        )
         return parse_outline_response(
             raw_output=response_text,
             project=state.get("project"),
@@ -185,7 +185,7 @@ async def generate_outline_draft(state: ProjectState, *, model: Any) -> OutlineS
             model,
             build_planner_repair_messages(
                 planning_context=planning_context,
-                invalid_output=response_text,
+                invalid_output=response_text or "<draft invocation failed>",
                 validation_error=str(initial_error),
             ),
         )
