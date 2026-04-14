@@ -12,6 +12,8 @@ declare module 'vue' {
     AppDock: typeof import('./components/common/AppDock.vue')['default']
     AppShellLayout: typeof import('./layouts/AppShellLayout.vue')['default']
     ChatInput: typeof import('./components/chat/ChatInput.vue')['default']
+    ChatMessage: typeof import('./components/chat/ChatMessage.vue')['default']
+    ChatPanel: typeof import('./components/chat/ChatPanel.vue')['default']
     CreateProjectDialog: typeof import('./components/dashboard/CreateProjectDialog.vue')['default']
     DashboardPage: typeof import('./pages/dashboard/DashboardPage.vue')['default']
     FileCard: typeof import('./components/chat/FileCard.vue')['default']
@@ -20,6 +22,8 @@ declare module 'vue' {
     LLMSettings: typeof import('./components/settings/LLMSettings.vue')['default']
     MainLayout: typeof import('./layouts/MainLayout.vue')['default']
     ModeSwitchPill: typeof import('./components/common/ModeSwitchPill.vue')['default']
+    OutlinePageItem: typeof import('./components/outline/OutlinePageItem.vue')['default']
+    OutlinePanel: typeof import('./components/outline/OutlinePanel.vue')['default']
     ProjectCard: typeof import('./components/dashboard/ProjectCard.vue')['default']
     ProjectFilter: typeof import('./components/dashboard/ProjectFilter.vue')['default']
     ProjectGrid: typeof import('./components/dashboard/ProjectGrid.vue')['default']
@@ -28,6 +32,7 @@ declare module 'vue' {
     SettingsPage: typeof import('./pages/settings/SettingsPage.vue')['default']
     StorageSettings: typeof import('./components/settings/StorageSettings.vue')['default']
     ThemeSettings: typeof import('./components/settings/ThemeSettings.vue')['default']
+    ThinkingBubble: typeof import('./components/chat/ThinkingBubble.vue')['default']
     WorkspacePage: typeof import('./pages/workspace/WorkspacePage.vue')['default']
   }
 }
