@@ -1,4 +1,5 @@
 """Service layer placeholder for future business logic."""
+from app.services.chat_service import ChatMessageNotFoundError, ChatService, ChatServiceError, ChatStorageError
 from app.services.file_service import (
     FileParsingError,
     FileService,
@@ -19,6 +20,10 @@ from app.services.settings_service import SettingsService, SettingsServiceError
 from app.services.sse_manager import SSEManager, SSEManagerError
 
 __all__ = [
+    "ChatMessageNotFoundError",
+    "ChatService",
+    "ChatServiceError",
+    "ChatStorageError",
     "FileParsingError",
     "FileService",
     "FileServiceError",

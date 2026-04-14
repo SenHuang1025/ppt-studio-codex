@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from typing import NoReturn
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 from sse_starlette import EventSourceResponse
 
+from app.agents import API_KEY_HEADER, AgentGraphContext, build_llm_runtime, run_agent_workflow
+from app.agents.llm import LLMConfigurationError, MissingAPIKeyError
+from app.api.chat import get_chat_service
 from app.api.files import get_file_service
-from app.models import UploadedFile
-from app.models.enums import FileParseStatus
-from app.schemas import AgentChatRequest
-from app.services import FileService, SSEManager
+from app.api.projects import get_project_service
+from app.api.settings import get_settings_service
+from app.schemas import AgentChatRequest, AgentConfirmOutlineRequest, OutlineSchema
+from app.services import ChatService, FileService, ProjectNotFoundError, ProjectService, SSEManager, SettingsService
 
 router = APIRouter(prefix="/api/projects/{project_id}/agent", tags=["agent"])
 
@@ -23,21 +27,87 @@ def get_sse_manager(request: Request) -> SSEManager:
     return sse_manager
 
 
+def _raise_agent_http_error(exc: Exception) -> NoReturn:
+    if isinstance(exc, (MissingAPIKeyError, LLMConfigurationError)):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    raise exc
+
+
 @router.post("/chat")
 async def chat_with_agent(
     project_id: str,
     payload: AgentChatRequest,
     request: Request,
     file_service: FileService = Depends(get_file_service),
+    chat_service: ChatService = Depends(get_chat_service),
+    project_service: ProjectService = Depends(get_project_service),
+    settings_service: SettingsService = Depends(get_settings_service),
     sse_manager: SSEManager = Depends(get_sse_manager),
 ) -> EventSourceResponse:
+    api_key = request.headers.get(API_KEY_HEADER, "").strip()
+
+    try:
+        llm_runtime = await build_llm_runtime(
+            settings_service=settings_service,
+            api_key=api_key,
+        )
+    except Exception as exc:
+        _raise_agent_http_error(exc)
+
     stream_id, stream = await sse_manager.open_stream(project_id)
 
     async def stream_response() -> AsyncGenerator[object, None]:
         producer_task = asyncio.create_task(
             _produce_agent_events(
                 file_service=file_service,
+                chat_service=chat_service,
                 project_id=project_id,
+                project_service=project_service,
+                request_payload=payload,
+                sse_manager=sse_manager,
+                stream_id=stream_id,
+                llm_runtime=llm_runtime,
+            )
+        )
+
+        try:
+            async for event in stream:
+                if await request.is_disconnected():
+                    producer_task.cancel()
+                    break
+
+                yield event
+        finally:
+            if not producer_task.done():
+                producer_task.cancel()
+
+            try:
+                await producer_task
+            except asyncio.CancelledError:
+                pass
+
+            await sse_manager.close_stream(project_id, stream_id=stream_id)
+
+    return EventSourceResponse(stream_response(), ping=None)
+
+
+@router.post("/confirm-outline")
+async def confirm_outline(
+    project_id: str,
+    payload: AgentConfirmOutlineRequest,
+    request: Request,
+    chat_service: ChatService = Depends(get_chat_service),
+    project_service: ProjectService = Depends(get_project_service),
+    sse_manager: SSEManager = Depends(get_sse_manager),
+) -> EventSourceResponse:
+    stream_id, stream = await sse_manager.open_stream(project_id)
+
+    async def stream_response() -> AsyncGenerator[object, None]:
+        producer_task = asyncio.create_task(
+            _produce_confirm_outline_events(
+                chat_service=chat_service,
+                project_id=project_id,
+                project_service=project_service,
                 request_payload=payload,
                 sse_manager=sse_manager,
                 stream_id=stream_id,
@@ -67,82 +137,58 @@ async def chat_with_agent(
 
 async def _produce_agent_events(
     *,
+    chat_service: ChatService,
     file_service: FileService,
     project_id: str,
+    project_service: ProjectService,
     request_payload: AgentChatRequest,
     sse_manager: SSEManager,
     stream_id: str,
+    llm_runtime: object,
 ) -> None:
     cancelled = False
 
+    async def sse_callback(event: str, data: dict[str, object]) -> None:
+        await sse_manager.send_event(project_id, event, data, stream_id=stream_id)
+
     try:
-        await sse_manager.send_event(
-            project_id,
-            "thinking",
-            {
-                "agent": "system",
-                "content": "正在建立实时会话...",
-            },
-            stream_id=stream_id,
+        user_message = await chat_service.create_message(
+            project_id=project_id,
+            role="user",
+            content=request_payload.message,
+            message_type="text",
+            page_number=request_payload.page_number,
         )
-
-        uploaded_files = await file_service.list_files(project_id)
-        parsed_count = 0
-        parse_error_count = 0
-
-        for uploaded_file in uploaded_files:
-            if not _should_parse_file(uploaded_file):
-                continue
-
-            try:
-                parsed_file = await file_service.parse_file(project_id, uploaded_file.id)
-            except Exception as exc:
-                parse_error_count += 1
-                logger.exception(
-                    "Failed to parse uploaded file {} during agent chat for project {}",
-                    uploaded_file.id,
-                    project_id,
-                )
-                await _safe_send_event(
-                    sse_manager,
-                    project_id,
-                    "error",
-                    {
-                        "message": f"文件 {uploaded_file.original_name} 解析失败：{str(exc) or exc.__class__.__name__}",
-                    },
-                    stream_id=stream_id,
-                )
-                continue
-
-            parsed_count += 1
-            await sse_manager.send_event(
-                project_id,
-                "file_parsed",
-                {
-                    "file_id": parsed_file.id,
-                    "file_name": parsed_file.original_name,
-                    "summary": _extract_file_summary(parsed_file),
-                },
-                stream_id=stream_id,
-            )
-
-        await sse_manager.send_event(
-            project_id,
-            "assistant_message",
-            {
-                "content": _build_assistant_message(
-                    user_message=request_payload.message,
-                    checked_file_count=len(uploaded_files),
-                    parsed_file_count=parsed_count,
-                    parse_error_count=parse_error_count,
-                )
-            },
-            stream_id=stream_id,
+        final_state = await run_agent_workflow(
+            project_id=project_id,
+            message=request_payload.message,
+            page_number=request_payload.page_number,
+            context=AgentGraphContext(
+                chat_service=chat_service,
+                file_service=file_service,
+                project_service=project_service,
+                llm_runtime=llm_runtime,
+            ),
+            sse_callback=sse_callback,
+            exclude_history_message_id=user_message.id,
+        )
+        await _persist_assistant_message(
+            chat_service=chat_service,
+            project_id=project_id,
+            final_state=final_state,
         )
     except asyncio.CancelledError:
         cancelled = True
         logger.info("Agent chat stream was cancelled for project {}", project_id)
         raise
+    except ProjectNotFoundError as exc:
+        await _safe_send_event(
+            sse_manager,
+            project_id,
+            "error",
+            {"message": str(exc)},
+            stream_id=stream_id,
+        )
     except Exception as exc:
         logger.exception("Agent chat SSE flow failed for project {}", project_id)
         await _safe_send_event(
@@ -168,41 +214,85 @@ async def _produce_agent_events(
         )
 
 
-def _should_parse_file(uploaded_file: UploadedFile) -> bool:
-    if uploaded_file.parse_status in {FileParseStatus.PENDING, FileParseStatus.FAILED}:
-        return True
-
-    return uploaded_file.parse_status == FileParseStatus.PARSED and uploaded_file.parsed_content is None
-
-
-def _extract_file_summary(uploaded_file: UploadedFile) -> str:
-    parsed_content = uploaded_file.parsed_content
-    if parsed_content and isinstance(parsed_content.get("summary"), str):
-        summary = parsed_content["summary"].strip()
-        if summary:
-            return summary
-
-    return f"{uploaded_file.original_name} 已完成解析。"
-
-
-def _build_assistant_message(
+async def _produce_confirm_outline_events(
     *,
-    user_message: str,
-    checked_file_count: int,
-    parsed_file_count: int,
-    parse_error_count: int,
-) -> str:
-    parts = [
-        "SSE 已接通。",
-        f"已收到你的消息：{user_message.strip()}。",
-        f"本次共检查 {checked_file_count} 个文件，新增解析 {parsed_file_count} 个文件。",
-    ]
+    chat_service: ChatService,
+    project_id: str,
+    project_service: ProjectService,
+    request_payload: AgentConfirmOutlineRequest,
+    sse_manager: SSEManager,
+    stream_id: str,
+) -> None:
+    cancelled = False
 
-    if parse_error_count > 0:
-        parts.append(f"其中 {parse_error_count} 个文件解析失败，请查看上方错误事件。")
+    try:
+        project = await project_service.get_project_detail(project_id)
+        resolved_outline = request_payload.outline or project.outline
 
-    parts.append("真正的 Agent 路由和大纲规划会在 Phase 2 的 2.4 接入。")
-    return " ".join(parts)
+        if resolved_outline is None:
+            await _safe_send_event(
+                sse_manager,
+                project_id,
+                "error",
+                {"message": "当前项目还没有可确认的大纲，请先在对话模式里生成或调整大纲。"},
+                stream_id=stream_id,
+            )
+            return
+
+        outline_schema = (
+            resolved_outline if isinstance(resolved_outline, OutlineSchema) else OutlineSchema.model_validate(resolved_outline)
+        )
+        await project_service.save_outline(project_id, outline_schema)
+
+        assistant_message = _build_confirm_outline_message(outline_schema)
+        await chat_service.create_message(
+            project_id=project_id,
+            role="assistant",
+            content=assistant_message,
+            message_type="text",
+        )
+        await _safe_send_event(
+            sse_manager,
+            project_id,
+            "assistant_message",
+            {"content": assistant_message},
+            stream_id=stream_id,
+        )
+    except asyncio.CancelledError:
+        cancelled = True
+        logger.info("Confirm outline stream was cancelled for project {}", project_id)
+        raise
+    except ProjectNotFoundError as exc:
+        await _safe_send_event(
+            sse_manager,
+            project_id,
+            "error",
+            {"message": str(exc)},
+            stream_id=stream_id,
+        )
+    except Exception as exc:
+        logger.exception("Confirm outline SSE flow failed for project {}", project_id)
+        await _safe_send_event(
+            sse_manager,
+            project_id,
+            "error",
+            {
+                "message": f"确认大纲失败：{str(exc) or exc.__class__.__name__}",
+            },
+            stream_id=stream_id,
+        )
+    finally:
+        if cancelled:
+            await sse_manager.close_stream(project_id, stream_id=stream_id)
+            return
+
+        await _safe_send_event(
+            sse_manager,
+            project_id,
+            "done",
+            {},
+            stream_id=stream_id,
+        )
 
 
 async def _safe_send_event(
@@ -217,3 +307,30 @@ async def _safe_send_event(
         await sse_manager.send_event(project_id, event, data, stream_id=stream_id)
     except Exception:
         logger.exception("Failed to send SSE event {} for project {}", event, project_id)
+
+
+def _build_confirm_outline_message(outline: OutlineSchema) -> str:
+    return (
+        f"已确认《{outline.title}》的 {outline.total_pages} 页大纲。"
+        "预览模式已切换；正式页面生成将在后续阶段接入。"
+    )
+
+
+async def _persist_assistant_message(
+    *,
+    chat_service: ChatService,
+    project_id: str,
+    final_state: dict[str, object],
+) -> None:
+    payload = final_state.get("persistable_assistant_message")
+    if not isinstance(payload, dict):
+        return
+
+    await chat_service.create_message(
+        project_id=project_id,
+        role=str(payload.get("role") or "assistant"),
+        content=str(payload.get("content") or ""),
+        message_type=str(payload.get("message_type") or "text"),
+        page_number=payload.get("page_number") if isinstance(payload.get("page_number"), int) else None,
+        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
+    )

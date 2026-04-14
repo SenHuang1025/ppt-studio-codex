@@ -1,7 +1,9 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
+import { chatService, type ChatMessageListOptions } from '@/services/chatService'
 import { fileService } from '@/services/fileService'
 import { projectService } from '@/services/projectService'
+import type { ChatMessage } from '@/types/chat'
 import type { UploadedFile } from '@/types/file'
 import type { ProjectDetailResponse } from '@/types/project'
 import { MAX_UPLOAD_FILE_SIZE_BYTES, UPLOAD_FILE_EXTENSIONS } from '@/types/file'
@@ -19,6 +21,10 @@ interface LoadProjectOptions {
 }
 
 interface LoadFilesOptions {
+  force?: boolean
+}
+
+interface LoadChatMessagesOptions extends ChatMessageListOptions {
   force?: boolean
 }
 
@@ -41,12 +47,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const filesUploading = ref(false)
   const filesError = ref<string | null>(null)
   const deletingFileIds = ref<string[]>([])
+  const chatMessages = ref<ChatMessage[]>([])
+  const chatMessagesLoading = ref(false)
+  const chatMessagesLoaded = ref(false)
+  const chatMessagesError = ref<string | null>(null)
 
   const hasProject = computed<boolean>(() => project.value !== null)
   const projectName = computed<string>(() => project.value?.name ?? '未命名项目')
 
   let lastLoadToken = 0
   let lastFilesLoadToken = 0
+  let lastChatMessagesLoadToken = 0
+  let lastChatMessagesOptions: ChatMessageListOptions = {}
 
   async function initializeWorkspace(payload: InitializeWorkspacePayload): Promise<void> {
     const normalizedProjectId = payload.projectId.trim()
@@ -61,6 +73,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       projectLoaded.value = false
       projectError.value = null
       resetFileState()
+      resetChatMessageState()
     }
 
     await loadProject(normalizedProjectId, {
@@ -68,6 +81,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     })
     await loadFiles(normalizedProjectId, {
       force: projectChanged || !filesLoaded.value
+    })
+    await loadChatMessages(normalizedProjectId, {
+      force: projectChanged || !chatMessagesLoaded.value
     })
   }
 
@@ -176,6 +192,70 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
     await loadProject(projectId, { force: true })
     await loadFiles(projectId, { force: true })
+    await loadChatMessages(projectId, { ...lastChatMessagesOptions, force: true })
+  }
+
+  async function loadChatMessages(
+    projectId: string,
+    options?: LoadChatMessagesOptions
+  ): Promise<ChatMessage[]> {
+    const normalizedProjectId = projectId.trim()
+
+    if (!normalizedProjectId) {
+      resetChatMessageState()
+      throw new Error('Project id is required.')
+    }
+
+    const normalizedOptions = normalizeChatMessageListOptions(options)
+    const shouldReuseCache = !options?.force
+      && chatMessagesLoaded.value
+      && currentProjectId.value === normalizedProjectId
+      && areChatMessageListOptionsEqual(lastChatMessagesOptions, normalizedOptions)
+
+    if (shouldReuseCache) {
+      return chatMessages.value
+    }
+
+    const loadToken = ++lastChatMessagesLoadToken
+    currentProjectId.value = normalizedProjectId
+    chatMessagesLoading.value = true
+    chatMessagesError.value = null
+
+    try {
+      const response = await chatService.list(normalizedProjectId, normalizedOptions)
+
+      if (loadToken !== lastChatMessagesLoadToken) {
+        return response.messages
+      }
+
+      chatMessages.value = sortChatMessages(response.messages)
+      chatMessagesLoaded.value = true
+      lastChatMessagesOptions = normalizedOptions
+      return chatMessages.value
+    } catch (error: unknown) {
+      if (loadToken === lastChatMessagesLoadToken) {
+        chatMessagesError.value = normalizeWorkspaceError(error)
+        chatMessagesLoaded.value = false
+
+        if (currentProjectId.value === normalizedProjectId) {
+          chatMessages.value = []
+        }
+      }
+
+      throw error
+    } finally {
+      if (loadToken === lastChatMessagesLoadToken) {
+        chatMessagesLoading.value = false
+      }
+    }
+  }
+
+  async function refreshChatMessages(): Promise<void> {
+    const projectId = requireCurrentProjectId()
+    await loadChatMessages(projectId, {
+      ...lastChatMessagesOptions,
+      force: true
+    })
   }
 
   async function uploadFilesForProject(selectedFiles: File[]): Promise<UploadFilesResult> {
@@ -260,6 +340,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     projectLoaded.value = false
     projectError.value = null
     resetFileState()
+    resetChatMessageState()
   }
 
   function syncPreviewPage(projectDetail: ProjectDetailResponse): void {
@@ -282,6 +363,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     deletingFileIds.value = []
   }
 
+  function resetChatMessageState(): void {
+    chatMessages.value = []
+    chatMessagesLoading.value = false
+    chatMessagesLoaded.value = false
+    chatMessagesError.value = null
+    lastChatMessagesOptions = {}
+  }
+
   function requireCurrentProjectId(): string {
     const projectId = currentProjectId.value?.trim()
 
@@ -293,6 +382,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   return {
+    chatMessages,
+    chatMessagesError,
+    chatMessagesLoaded,
+    chatMessagesLoading,
     deleteUploadedFile,
     filesError,
     filesLoaded,
@@ -304,6 +397,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     hasProject,
     initializeWorkspace,
     isDeletingFile,
+    loadChatMessages,
     loadFiles,
     loadProject,
     project,
@@ -311,6 +405,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     projectLoaded,
     projectLoading,
     projectName,
+    refreshChatMessages,
     refreshWorkspace,
     resetWorkspace,
     setMode,
@@ -366,6 +461,36 @@ function mergeUploadedFiles(existingFiles: UploadedFile[], nextFiles: UploadedFi
   }
 
   return sortUploadedFiles(Array.from(fileMap.values()))
+}
+
+function normalizeChatMessageListOptions(options?: ChatMessageListOptions): ChatMessageListOptions {
+  return {
+    includeGlobal: options?.includeGlobal ?? false,
+    limit: options?.limit,
+    pageNumber: options?.pageNumber
+  }
+}
+
+function areChatMessageListOptionsEqual(
+  left: ChatMessageListOptions,
+  right: ChatMessageListOptions
+): boolean {
+  return left.includeGlobal === right.includeGlobal
+    && left.limit === right.limit
+    && left.pageNumber === right.pageNumber
+}
+
+function sortChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  return [...messages].sort((left, right) => {
+    const leftTimestamp = Date.parse(left.created_at)
+    const rightTimestamp = Date.parse(right.created_at)
+
+    if (!Number.isNaN(leftTimestamp) && !Number.isNaN(rightTimestamp) && leftTimestamp !== rightTimestamp) {
+      return leftTimestamp - rightTimestamp
+    }
+
+    return left.id.localeCompare(right.id)
+  })
 }
 
 function sortUploadedFiles(files: UploadedFile[]): UploadedFile[] {

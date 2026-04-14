@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import Settings
 from app.models import Project
-from app.schemas import ProjectCreate, ProjectStatus, ProjectUpdate
+from app.schemas import OutlineSchema, ProjectCreate, ProjectStatus, ProjectUpdate
 
 
 class ProjectServiceError(Exception):
@@ -118,6 +118,25 @@ class ProjectService:
             ) from exc
 
         logger.info("Updated project {}", project_id)
+        return project
+
+    async def save_outline(self, project_id: str, outline: OutlineSchema | dict[str, object]) -> Project:
+        project = await self._get_project_or_raise(project_id)
+        outline_schema = outline if isinstance(outline, OutlineSchema) else OutlineSchema.model_validate(outline)
+        project.outline = outline_schema.model_dump(mode="json")
+        project.total_pages = outline_schema.total_pages
+        project.status = ProjectStatus.PLANNING
+
+        try:
+            await self.session.commit()
+            await self.session.refresh(project)
+        except SQLAlchemyError as exc:
+            await self.session.rollback()
+            raise ProjectStorageError(
+                f"Failed to persist outline for project '{project_id}'.",
+            ) from exc
+
+        logger.info("Saved outline for project {}", project_id)
         return project
 
     async def delete_project(self, project_id: str) -> None:

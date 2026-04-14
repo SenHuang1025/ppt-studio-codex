@@ -10,15 +10,17 @@ export interface SettingsResponse {
   llm_provider: LLMProvider
   model_name: string
   api_base_url: string
+  multi_agent_deliberation_enabled: boolean
   default_theme: AppTheme
   storage_path: string
 }
 
 export interface SettingsUpdatePayload {
-  llm_provider: LLMProvider
-  model_name: string
-  api_base_url: string
-  default_theme: AppTheme
+  llm_provider?: LLMProvider
+  model_name?: string
+  api_base_url?: string
+  multi_agent_deliberation_enabled?: boolean
+  default_theme?: AppTheme
 }
 
 export interface SettingsFormState {

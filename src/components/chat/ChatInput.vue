@@ -25,6 +25,7 @@ const emit = defineEmits<{
 }>()
 
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const inputRef = ref<InstanceType<typeof NInput> | null>(null)
 const canSubmit = computed<boolean>(() => {
   if (props.disabled || props.submitting || props.uploading) {
     return false
@@ -62,6 +63,23 @@ function handleSubmit(): void {
 
   emit('submit', message)
 }
+
+function handleKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Enter' || event.shiftKey) {
+    return
+  }
+
+  event.preventDefault()
+  handleSubmit()
+}
+
+function focusInput(): void {
+  inputRef.value?.focus()
+}
+
+defineExpose({
+  focusInput
+})
 </script>
 
 <template>
@@ -76,11 +94,13 @@ function handleSubmit(): void {
     />
 
     <NInput
+      ref="inputRef"
       :autosize="{ minRows: 3, maxRows: 6 }"
       :disabled="disabled || submitting"
       :value="modelValue"
-      placeholder="文件上传与 SSE 验证已接通，现在可以发送一条消息检查实时事件。"
+      placeholder="描述你的演示目标、受众和想突出的重点；也可以结合已上传资料继续调整大纲。"
       type="textarea"
+      @keydown="handleKeydown"
       @update:value="(value) => emit('update:modelValue', value)"
     />
 
@@ -90,7 +110,7 @@ function handleSubmit(): void {
       </div>
 
       <div class="flex flex-wrap justify-end gap-2">
-        <NButton secondary strong :disabled="disabled || submitting" :loading="uploading" @click="openFilePicker">
+        <NButton secondary strong :disabled="disabled || submitting || uploading" :loading="uploading" @click="openFilePicker">
           📎 上传文件
         </NButton>
         <NButton tertiary strong :disabled="!canSubmit" :loading="submitting" @click="handleSubmit">发送消息</NButton>

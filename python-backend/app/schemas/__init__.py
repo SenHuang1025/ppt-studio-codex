@@ -1,4 +1,11 @@
-from app.schemas.chat import AgentChatRequest, ChatMessageCreate, ChatMessageResponse, SSEEvent
+from app.schemas.chat import (
+    AgentChatRequest,
+    AgentConfirmOutlineRequest,
+    ChatMessageCreate,
+    ChatMessageListResponse,
+    ChatMessageResponse,
+    SSEEvent,
+)
 from app.schemas.enums import ChatMessageType, ChatRole, FileParseStatus, PageStatus, ProjectStatus
 from app.schemas.file import ParsedFileResponse, UploadedFileDeleteResponse, UploadedFileListResponse, UploadedFileResponse
 from app.schemas.health import HealthResponse
@@ -18,7 +25,9 @@ from app.schemas.settings import AppTheme, LLMProvider, SettingsResponse, Settin
 
 __all__ = [
     "AgentChatRequest",
+    "AgentConfirmOutlineRequest",
     "ChatMessageCreate",
+    "ChatMessageListResponse",
     "ChatMessageResponse",
     "ChatMessageType",
     "ChatRole",

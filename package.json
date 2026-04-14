@@ -11,16 +11,21 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["electron", "esbuild"]
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
   },
   "packageManager": "pnpm@10.33.0",
   "dependencies": {
+    "markdown-it": "^14.1.1",
     "naive-ui": "^2.41.0",
     "pinia": "^3.0.2",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.13.10",
     "@unocss/preset-attributify": "^66.5.0",
     "@unocss/preset-typography": "^66.5.0",

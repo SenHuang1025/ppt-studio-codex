@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from app.services.sse_manager import SSEManager
 
 
-@pytest.mark.asyncio
-async def test_sse_manager_stream_receives_events_and_closes() -> None:
+def test_sse_manager_stream_receives_events_and_closes() -> None:
+    asyncio.run(_run_sse_manager_test())
+
+
+async def _run_sse_manager_test() -> None:
     sse_manager = SSEManager()
     stream = await sse_manager.create_stream("project-1")
 
@@ -22,5 +23,9 @@ async def test_sse_manager_stream_receives_events_and_closes() -> None:
 
     await sse_manager.close_stream("project-1")
 
-    with pytest.raises(StopAsyncIteration):
+    try:
         await asyncio.wait_for(anext(stream), timeout=1)
+    except StopAsyncIteration:
+        return
+
+    raise AssertionError("SSE stream should have been closed.")

@@ -23,12 +23,14 @@ class SettingsService:
         "llm_provider",
         "model_name",
         "api_base_url",
+        "multi_agent_deliberation_enabled",
         "default_theme",
     )
     DEFAULT_VALUES = {
         "llm_provider": LLMProvider.OPENAI.value,
         "model_name": "gpt-5.2",
         "api_base_url": "https://api.openai.com/v1",
+        "multi_agent_deliberation_enabled": "false",
         "default_theme": AppTheme.WARM_PAPER.value,
     }
 
@@ -83,6 +85,10 @@ class SettingsService:
             ),
             model_name=self._coerce_string("model_name", values.get("model_name")),
             api_base_url=self._coerce_string("api_base_url", values.get("api_base_url")),
+            multi_agent_deliberation_enabled=self._coerce_bool(
+                values.get("multi_agent_deliberation_enabled"),
+                default=False,
+            ),
             default_theme=self._coerce_enum(
                 enum_cls=AppTheme,
                 raw_value=values.get("default_theme"),
@@ -106,7 +112,20 @@ class SettingsService:
         except ValueError:
             return default
 
+    def _coerce_bool(self, raw_value: str | None, *, default: bool) -> bool:
+        if raw_value is None:
+            return default
+
+        normalized = raw_value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return default
+
     def _normalize_value(self, value: object) -> str:
         if isinstance(value, Enum):
             return str(value.value)
+        if isinstance(value, bool):
+            return "true" if value else "false"
         return str(value).strip()

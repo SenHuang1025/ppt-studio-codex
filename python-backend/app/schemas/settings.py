@@ -22,6 +22,7 @@ class SettingsResponse(APIModel):
     llm_provider: LLMProvider
     model_name: str
     api_base_url: str
+    multi_agent_deliberation_enabled: bool
     default_theme: AppTheme
     storage_path: str
 
@@ -30,6 +31,7 @@ class SettingsUpdate(APIModel):
     llm_provider: LLMProvider | None = None
     model_name: str | None = Field(default=None, min_length=1, max_length=255)
     api_base_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    multi_agent_deliberation_enabled: bool | None = None
     default_theme: AppTheme | None = None
 
     @field_validator("model_name")

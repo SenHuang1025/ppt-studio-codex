@@ -1,11 +1,15 @@
 import { getApiBaseUrl } from './api'
 import type {
   AgentChatRequestPayload,
+  AgentConfirmOutlineRequestPayload,
   AgentSSEEvent,
   AgentSSEEventMap,
   AgentSSEEventName,
   AgentStreamEvent,
   AssistantMessageEventPayload,
+  DeliberationRoundEventPayload,
+  DeliberationStartedEventPayload,
+  DeliberationSummaryEventPayload,
   ErrorEventPayload,
   FileParsedEventPayload,
   OutlineEventPayload,
@@ -20,6 +24,9 @@ export class AgentSSEClient {
   private readonly thinkingHandlers = new Set<EventHandler<ThinkingEventPayload>>()
   private readonly fileParsedHandlers = new Set<EventHandler<FileParsedEventPayload>>()
   private readonly outlineHandlers = new Set<EventHandler<OutlineEventPayload>>()
+  private readonly deliberationStartedHandlers = new Set<EventHandler<DeliberationStartedEventPayload>>()
+  private readonly deliberationRoundHandlers = new Set<EventHandler<DeliberationRoundEventPayload>>()
+  private readonly deliberationSummaryHandlers = new Set<EventHandler<DeliberationSummaryEventPayload>>()
   private readonly assistantMessageHandlers = new Set<EventHandler<AssistantMessageEventPayload>>()
   private readonly errorHandlers = new Set<EventHandler<ErrorEventPayload>>()
   private readonly doneHandlers = new Set<EventHandler<Record<string, never>>>()
@@ -39,16 +46,129 @@ export class AgentSSEClient {
 
     this.disconnect()
 
+    await this.openStream({
+      includeApiKey: true,
+      payload: this.buildRequestPayload(normalizedMessage, pageNumber),
+      url: await this.buildChatUrl(normalizedProjectId)
+    })
+  }
+
+  public async confirmOutline(projectId: string, outline?: AgentConfirmOutlineRequestPayload['outline']): Promise<void> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) {
+      throw new Error('Project id is required before confirming the outline.')
+    }
+
+    this.disconnect()
+
+    await this.openStream({
+      includeApiKey: false,
+      payload: this.buildConfirmOutlinePayload(outline),
+      url: await this.buildConfirmOutlineUrl(normalizedProjectId)
+    })
+  }
+
+  public disconnect(): void {
+    this.abortController?.abort()
+    this.abortController = null
+  }
+
+  public onThinking(callback: EventHandler<ThinkingEventPayload>): () => void {
+    return this.registerHandler(this.thinkingHandlers, callback)
+  }
+
+  public onFileParsed(callback: EventHandler<FileParsedEventPayload>): () => void {
+    return this.registerHandler(this.fileParsedHandlers, callback)
+  }
+
+  public onOutline(callback: EventHandler<OutlineEventPayload>): () => void {
+    return this.registerHandler(this.outlineHandlers, callback)
+  }
+
+  public onDeliberationStarted(callback: EventHandler<DeliberationStartedEventPayload>): () => void {
+    return this.registerHandler(this.deliberationStartedHandlers, callback)
+  }
+
+  public onDeliberationRound(callback: EventHandler<DeliberationRoundEventPayload>): () => void {
+    return this.registerHandler(this.deliberationRoundHandlers, callback)
+  }
+
+  public onDeliberationSummary(callback: EventHandler<DeliberationSummaryEventPayload>): () => void {
+    return this.registerHandler(this.deliberationSummaryHandlers, callback)
+  }
+
+  public onAssistantMessage(callback: EventHandler<AssistantMessageEventPayload>): () => void {
+    return this.registerHandler(this.assistantMessageHandlers, callback)
+  }
+
+  public onError(callback: EventHandler<ErrorEventPayload>): () => void {
+    return this.registerHandler(this.errorHandlers, callback)
+  }
+
+  public onDone(callback: EventHandler<Record<string, never>>): () => void {
+    return this.registerHandler(this.doneHandlers, callback)
+  }
+
+  public onEvent(callback: AnyEventHandler): () => void {
+    return this.registerHandler(this.anyEventHandlers, callback)
+  }
+
+  private async buildChatUrl(projectId: string): Promise<string> {
+    const baseUrl = await getApiBaseUrl()
+    return new URL(
+      `projects/${encodeURIComponent(projectId)}/agent/chat`,
+      ensureTrailingSlash(baseUrl)
+    ).toString()
+  }
+
+  private async buildConfirmOutlineUrl(projectId: string): Promise<string> {
+    const baseUrl = await getApiBaseUrl()
+    return new URL(
+      `projects/${encodeURIComponent(projectId)}/agent/confirm-outline`,
+      ensureTrailingSlash(baseUrl)
+    ).toString()
+  }
+
+  private buildRequestPayload(message: string, pageNumber?: number): AgentChatRequestPayload {
+    if (pageNumber === undefined) {
+      return { message }
+    }
+
+    return {
+      message,
+      page_number: pageNumber
+    }
+  }
+
+  private buildConfirmOutlinePayload(outline?: AgentConfirmOutlineRequestPayload['outline']): AgentConfirmOutlineRequestPayload {
+    if (!outline) {
+      return {}
+    }
+
+    return { outline }
+  }
+
+  private async openStream(options: {
+    includeApiKey: boolean
+    payload: AgentChatRequestPayload | AgentConfirmOutlineRequestPayload
+    url: string
+  }): Promise<void> {
     const controller = new AbortController()
     this.abortController = controller
 
+    const headers: HeadersInit = {
+      accept: 'text/event-stream',
+      'content-type': 'application/json'
+    }
+
+    if (options.includeApiKey) {
+      headers['x-ppt-studio-api-key'] = await this.resolveApiKey()
+    }
+
     try {
-      const response = await fetch(await this.buildChatUrl(normalizedProjectId), {
-        body: JSON.stringify(this.buildRequestPayload(normalizedMessage, pageNumber)),
-        headers: {
-          accept: 'text/event-stream',
-          'content-type': 'application/json'
-        },
+      const response = await fetch(options.url, {
+        body: JSON.stringify(options.payload),
+        headers,
         method: 'POST',
         signal: controller.signal
       })
@@ -77,58 +197,6 @@ export class AgentSSEClient {
       if (this.abortController === controller) {
         this.abortController = null
       }
-    }
-  }
-
-  public disconnect(): void {
-    this.abortController?.abort()
-    this.abortController = null
-  }
-
-  public onThinking(callback: EventHandler<ThinkingEventPayload>): () => void {
-    return this.registerHandler(this.thinkingHandlers, callback)
-  }
-
-  public onFileParsed(callback: EventHandler<FileParsedEventPayload>): () => void {
-    return this.registerHandler(this.fileParsedHandlers, callback)
-  }
-
-  public onOutline(callback: EventHandler<OutlineEventPayload>): () => void {
-    return this.registerHandler(this.outlineHandlers, callback)
-  }
-
-  public onAssistantMessage(callback: EventHandler<AssistantMessageEventPayload>): () => void {
-    return this.registerHandler(this.assistantMessageHandlers, callback)
-  }
-
-  public onError(callback: EventHandler<ErrorEventPayload>): () => void {
-    return this.registerHandler(this.errorHandlers, callback)
-  }
-
-  public onDone(callback: EventHandler<Record<string, never>>): () => void {
-    return this.registerHandler(this.doneHandlers, callback)
-  }
-
-  public onEvent(callback: AnyEventHandler): () => void {
-    return this.registerHandler(this.anyEventHandlers, callback)
-  }
-
-  private async buildChatUrl(projectId: string): Promise<string> {
-    const baseUrl = await getApiBaseUrl()
-    return new URL(
-      `projects/${encodeURIComponent(projectId)}/agent/chat`,
-      ensureTrailingSlash(baseUrl)
-    ).toString()
-  }
-
-  private buildRequestPayload(message: string, pageNumber?: number): AgentChatRequestPayload {
-    if (pageNumber === undefined) {
-      return { message }
-    }
-
-    return {
-      message,
-      page_number: pageNumber
     }
   }
 
@@ -205,6 +273,15 @@ export class AgentSSEClient {
       case 'outline':
         this.emitHandlers(this.outlineHandlers, event.data)
         return
+      case 'deliberation_started':
+        this.emitHandlers(this.deliberationStartedHandlers, event.data)
+        return
+      case 'deliberation_round':
+        this.emitHandlers(this.deliberationRoundHandlers, event.data)
+        return
+      case 'deliberation_summary':
+        this.emitHandlers(this.deliberationSummaryHandlers, event.data)
+        return
       case 'assistant_message':
         this.emitHandlers(this.assistantMessageHandlers, event.data)
         return
@@ -258,6 +335,17 @@ export class AgentSSEClient {
     }
 
     return new Error('Unable to establish the SSE chat stream.')
+  }
+
+  private async resolveApiKey(): Promise<string> {
+    const runtime = resolveRuntime()
+    const apiKey = (await runtime.getApiKey())?.trim() ?? ''
+
+    if (!apiKey) {
+      throw new Error('请先在设置页配置 API Key')
+    }
+
+    return apiKey
   }
 }
 
@@ -327,6 +415,9 @@ function isKnownAgentSSEEventName(value: string): value is AgentSSEEventName {
   return value === 'thinking'
     || value === 'file_parsed'
     || value === 'outline'
+    || value === 'deliberation_started'
+    || value === 'deliberation_round'
+    || value === 'deliberation_summary'
     || value === 'assistant_message'
     || value === 'error'
     || value === 'done'
@@ -369,4 +460,12 @@ function normalizeNewlines(value: string): string {
 
 function ensureTrailingSlash(value: string): string {
   return value.endsWith('/') ? value : `${value}/`
+}
+
+function resolveRuntime(): Window['pptStudio'] {
+  if (typeof window === 'undefined' || !window.pptStudio) {
+    throw new Error('PPT Studio Electron runtime is unavailable in the current context.')
+  }
+
+  return window.pptStudio
 }
