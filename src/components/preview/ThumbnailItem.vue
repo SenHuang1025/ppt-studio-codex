@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import LinearProgressGlow from '@/components/common/LinearProgressGlow.vue'
 import type { PreviewPageItem } from '@/types/preview'
 import { formatPreviewPageType, getPreviewPageStatusLabel } from '@/utils/preview'
 
 const props = defineProps<{
+  currentGeneratingPageNumber: number | null
   item: PreviewPageItem
   selected: boolean
 }>()
@@ -16,16 +18,33 @@ const statusLabel = computed<string>(() => getPreviewPageStatusLabel(props.item.
 const pageTypeLabel = computed<string>(() => formatPreviewPageType(props.item.pageType))
 const versionLabel = computed<string>(() => (props.item.version ? `v${props.item.version}` : '等待版本'))
 const summaryLabel = computed<string>(() => props.item.contentBrief || props.item.layout || '等待当前页内容写入')
+const isCurrentGeneratingPage = computed<boolean>(() =>
+  props.item.status === 'generating' && props.currentGeneratingPageNumber === props.item.pageNumber
+)
 
 const statusClass = computed<string>(() => {
   switch (props.item.status) {
     case 'generated':
       return 'bg-[color:var(--primary-200)]'
     case 'generating':
-      return 'bg-[color:var(--accent-100)]'
+      return isCurrentGeneratingPage.value
+        ? 'thumbnail-generating-dot bg-[color:var(--accent-100)]'
+        : 'bg-[rgba(241,143,1,0.72)]'
     default:
       return 'bg-[rgba(95,95,95,0.26)]'
   }
+})
+
+const buttonClass = computed<string>(() => {
+  if (props.selected && props.item.status === 'generating') {
+    return 'border-[rgba(241,143,1,0.28)] bg-[rgba(255,244,230,0.96)] text-[color:var(--accent-200)] shadow-[var(--shadow-hover)]'
+  }
+
+  if (props.selected) {
+    return 'border-[color:var(--app-border-strong)] bg-[color:var(--app-primary-soft)] text-[color:var(--primary-300)] shadow-[var(--shadow-hover)]'
+  }
+
+  return 'border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)] hover:-translate-y-0.5 hover:border-[color:var(--app-border-strong)] hover:shadow-[var(--shadow-soft)]'
 })
 
 const previewBlockClass = computed<string>(() => {
@@ -33,9 +52,33 @@ const previewBlockClass = computed<string>(() => {
     case 'generated':
       return 'border-[rgba(104,166,125,0.2)] bg-[linear-gradient(180deg,rgba(255,251,243,0.98)_0%,rgba(247,240,226,0.98)_100%)]'
     case 'generating':
-      return 'border-[rgba(241,143,1,0.18)] bg-[linear-gradient(180deg,rgba(255,248,237,0.98)_0%,rgba(243,231,210,0.98)_100%)]'
+      return isCurrentGeneratingPage.value
+        ? 'border-[rgba(241,143,1,0.24)] bg-[linear-gradient(180deg,rgba(255,248,237,0.98)_0%,rgba(245,229,204,0.98)_100%)] shadow-[0_10px_24px_rgba(241,143,1,0.12)]'
+        : 'border-[rgba(241,143,1,0.18)] bg-[linear-gradient(180deg,rgba(255,248,237,0.98)_0%,rgba(243,231,210,0.98)_100%)]'
     default:
       return 'border-[rgba(95,95,95,0.14)] bg-[rgba(255,255,255,0.52)]'
+  }
+})
+
+const progressTone = computed<'accent' | 'muted' | 'primary'>(() => {
+  switch (props.item.status) {
+    case 'generated':
+      return 'primary'
+    case 'generating':
+      return 'accent'
+    default:
+      return 'muted'
+  }
+})
+
+const progressValue = computed<number>(() => {
+  switch (props.item.status) {
+    case 'generated':
+      return 1
+    case 'generating':
+      return 0.48
+    default:
+      return 0.08
   }
 })
 </script>
@@ -43,11 +86,7 @@ const previewBlockClass = computed<string>(() => {
 <template>
   <button
     class="w-full rounded-[var(--radius-xl)] border p-3 text-left transition duration-250"
-    :class="
-      selected
-        ? 'border-[color:var(--app-border-strong)] bg-[color:var(--app-primary-soft)] text-[color:var(--primary-300)] shadow-[var(--shadow-hover)]'
-        : 'border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)] hover:-translate-y-0.5 hover:border-[color:var(--app-border-strong)] hover:shadow-[var(--shadow-soft)]'
-    "
+    :class="buttonClass"
     type="button"
     @click="emit('select', item.pageNumber)"
   >
@@ -72,9 +111,17 @@ const previewBlockClass = computed<string>(() => {
     </div>
 
     <div
-      class="aspect-[16/9] rounded-[var(--radius-lg)] border px-3 py-3"
+      class="relative aspect-[16/9] overflow-hidden rounded-[var(--radius-lg)] border px-3 py-3"
       :class="previewBlockClass"
     >
+      <div v-if="item.status === 'generating'" class="thumbnail-generating-sheen absolute inset-y-0 left-[-32%] w-1/3" />
+      <div class="absolute inset-x-3 top-3">
+        <LinearProgressGlow
+          :animated="item.status === 'generating'"
+          :tone="progressTone"
+          :value="progressValue"
+        />
+      </div>
       <div class="flex h-full flex-col justify-between rounded-[calc(var(--radius-lg)-6px)] border border-dashed border-[rgba(131,53,0,0.1)] p-3">
         <div class="flex items-center justify-between gap-3">
           <div class="h-2.5 w-14 rounded-full bg-[rgba(131,53,0,0.12)]" />
@@ -99,3 +146,45 @@ const previewBlockClass = computed<string>(() => {
     </div>
   </button>
 </template>
+
+<style scoped>
+.thumbnail-generating-dot {
+  animation: thumbnail-generating-pulse 1.8s ease-in-out infinite;
+}
+
+.thumbnail-generating-sheen {
+  animation: thumbnail-generating-sheen 1.9s ease-in-out infinite;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 247, 231, 0.7), rgba(255, 255, 255, 0));
+  opacity: 0.7;
+  transform: translateX(-135%);
+}
+
+@keyframes thumbnail-generating-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+    transform: scale(0.96);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes thumbnail-generating-sheen {
+  0% {
+    opacity: 0;
+    transform: translateX(-135%);
+  }
+
+  20% {
+    opacity: 0.7;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(540%);
+  }
+}
+</style>

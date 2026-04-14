@@ -2,9 +2,11 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
 import { NButton, NTag } from 'naive-ui'
+import PageGenerationProgressCard from '@/components/chat/PageGenerationProgressCard.vue'
 import ThinkingBubble from '@/components/chat/ThinkingBubble.vue'
 import type { ChatTimelineFileAttachment, ChatTimelineItem } from '@/types/chat'
 import { FILE_PARSE_STATUS_META, formatFileSize, formatUploadedFileType } from '@/utils/file'
+import { detectGenerationFallbackSummary } from '@/utils/preview'
 
 type DeliberationItem = Extract<ChatTimelineItem, { type: 'deliberation_message' }>
 
@@ -42,8 +44,14 @@ const assistantLeadLabel = computed<string>(() => (props.item.type === 'assistan
 const outlinePreviewPages = computed(() =>
   props.item.type === 'outline_message' ? props.item.outline?.pages.slice(0, 4) ?? [] : []
 )
+const deliberationSectionLabel = computed<string>(() =>
+  props.item.type === 'deliberation_message' ? resolveDeliberationSectionLabel(props.item) : ''
+)
 const deliberationHeadline = computed<string>(() =>
   props.item.type === 'deliberation_message' ? resolveDeliberationHeadline(props.item) : ''
+)
+const deliberationContextLabel = computed<string | null>(() =>
+  props.item.type === 'deliberation_message' ? resolveDeliberationContextLabel(props.item) : null
 )
 const deliberationTargetBadge = computed<string>(() =>
   props.item.type === 'deliberation_message' ? resolveDeliberationTargetBadge(props.item) : ''
@@ -60,7 +68,7 @@ const deliberationRoleEntries = computed<DeliberationDisplayEntry[]>(() =>
   props.item.type === 'deliberation_message' ? props.item.entries.map(mapDeliberationEntry) : []
 )
 const isDeliberationFallback = computed<boolean>(() =>
-  props.item.type === 'deliberation_message' ? detectDeliberationFallback(props.item.summary) : false
+  props.item.type === 'deliberation_message' ? detectGenerationFallbackSummary(props.item.summary) : false
 )
 
 watch(
@@ -186,6 +194,10 @@ function resolveDeliberationHeadline(item: DeliberationItem): string {
     return '大纲思辨中'
   }
 
+  if (item.target === 'page_generator') {
+    return '单页生成思辨中'
+  }
+
   const normalizedTarget = item.target.trim()
   if (!normalizedTarget) {
     return '思辨中'
@@ -204,7 +216,23 @@ function resolveDeliberationSummary(item: DeliberationItem): string {
     return '正在从草案、评审、综合三个阶段收敛最终大纲。'
   }
 
+  if (item.target === 'page_generator') {
+    return '正在围绕当前页面依次完成草案、评审与综合输出。'
+  }
+
   return '正在从草案、评审、综合三个阶段收敛当前结果。'
+}
+
+function resolveDeliberationSectionLabel(item: DeliberationItem): string {
+  return item.target === 'page_generator' ? '页面生成增强过程' : '规划增强过程'
+}
+
+function resolveDeliberationContextLabel(item: DeliberationItem): string | null {
+  if (item.pageNumber === null) {
+    return null
+  }
+
+  return `第 ${item.pageNumber} 页${item.pageTitle ? ` · ${item.pageTitle}` : ''}`
 }
 
 function resolveDeliberationTargetBadge(item: DeliberationItem): string {
@@ -212,23 +240,19 @@ function resolveDeliberationTargetBadge(item: DeliberationItem): string {
     return 'Planner'
   }
 
+  if (item.target === 'page_generator') {
+    return 'Page Generator'
+  }
+
   return item.target.trim() || 'Agent'
 }
 
 function resolveDeliberationSummaryClass(item: DeliberationItem): string {
-  if (detectDeliberationFallback(item.summary)) {
+  if (detectGenerationFallbackSummary(item.summary)) {
     return 'border-[rgba(241,143,1,0.22)] bg-[rgba(255,244,230,0.92)]'
   }
 
   return 'border-[rgba(104,166,125,0.14)] bg-[rgba(252,248,239,0.88)]'
-}
-
-function detectDeliberationFallback(summary: string | null): boolean {
-  if (!summary) {
-    return false
-  }
-
-  return /回退|fallback/i.test(summary)
 }
 
 function mapDeliberationEntry(entry: DeliberationItem['entries'][number]): DeliberationDisplayEntry {
@@ -392,11 +416,13 @@ function formatMessageTime(value: string): string {
     </div>
   </article>
 
+  <PageGenerationProgressCard v-else-if="item.type === 'page_generation_progress'" :item="item" />
+
   <article v-else-if="item.type === 'deliberation_message'" class="max-w-[96%]">
     <div class="rounded-[var(--radius-xl)] border border-[rgba(104,166,125,0.16)] bg-[rgba(255,249,239,0.84)] px-4 py-4 shadow-[var(--shadow-glass-1)]">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--primary-300)]">规划增强过程</div>
+          <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--primary-300)]">{{ deliberationSectionLabel }}</div>
           <div class="mt-2 flex flex-wrap items-center gap-2">
             <span class="text-base font-semibold text-[color:var(--app-text-primary)]">{{ deliberationHeadline }}</span>
             <NTag round :bordered="false" class="border border-[rgba(104,166,125,0.16)] bg-[rgba(104,166,125,0.12)] text-[color:var(--primary-300)]">
@@ -410,6 +436,12 @@ function formatMessageTime(value: string): string {
             >
               {{ item.rounds }} 轮
             </NTag>
+          </div>
+          <div
+            v-if="deliberationContextLabel"
+            class="mt-2 text-sm text-[color:var(--app-text-secondary)]"
+          >
+            {{ deliberationContextLabel }}
           </div>
           <div class="mt-3 rounded-[var(--radius-lg)] border px-3 py-3 text-sm leading-6 text-[color:var(--app-text-secondary)]" :class="deliberationSummaryClass">
             <div

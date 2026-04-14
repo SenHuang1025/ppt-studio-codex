@@ -1,9 +1,15 @@
 import { computed, watch, type Ref } from 'vue'
 import type { RouteLocationNormalizedLoaded, Router } from 'vue-router'
 import type { useWorkspaceStore, WorkspaceMode } from '@/stores/workspaceStore'
-import type { PreviewPageItem, PreviewPageStatus, RealtimePageGenerationState } from '@/types/preview'
-import type { Outline, OutlinePage, PageStatus, ProjectPage } from '@/types/project'
-import { clampPreviewPageNumber, parsePreviewPageQuery } from '@/utils/preview'
+import type { PreviewPageItem, RealtimePageGenerationState } from '@/types/preview'
+import type { Outline, OutlinePage, ProjectPage } from '@/types/project'
+import {
+  clampPreviewPageNumber,
+  normalizePreviewText,
+  parsePreviewPageQuery,
+  resolvePreviewPageStatus,
+  resolvePreviewPageTitle
+} from '@/utils/preview'
 
 type WorkspaceStore = ReturnType<typeof useWorkspaceStore>
 
@@ -56,21 +62,21 @@ export function usePreviewWorkspace(options: UsePreviewWorkspaceOptions) {
       const realtimeState = options.pageGenerationStates.value[pageNumber]
 
       return {
-        contentBrief: normalizeText(outlinePage?.content_brief),
+        contentBrief: normalizePreviewText(outlinePage?.content_brief),
         generatedPage,
         hasGeneratedCode: Boolean(generatedPage?.vue_code?.trim()),
-        layout: normalizeText(outlinePage?.layout),
+        layout: normalizePreviewText(outlinePage?.layout),
         outlinePage,
         pageNumber,
-        pageType: normalizeText(generatedPage?.page_type) || normalizeText(outlinePage?.type),
+        pageType: normalizePreviewText(generatedPage?.page_type) || normalizePreviewText(outlinePage?.type),
         status: resolvePreviewPageStatus({
           generatedPage,
           projectStatus: options.workspaceStore.project?.status,
-          realtimeStatus: realtimeState?.status ?? null
+          realtimeState: realtimeState ?? null
         }),
         title: resolvePreviewPageTitle({
           generatedPage,
-          outlinePage,
+          outlinePageTitle: outlinePage?.title,
           pageNumber,
           realtimeTitle: realtimeState?.title ?? null
         }),
@@ -203,50 +209,4 @@ export function usePreviewWorkspace(options: UsePreviewWorkspaceOptions) {
     goToPreviousPage,
     totalPreviewPages
   }
-}
-
-function resolvePreviewPageStatus(options: {
-  generatedPage: ProjectPage | null
-  projectStatus: string | null | undefined
-  realtimeStatus: PreviewPageStatus | null
-}): PreviewPageStatus {
-  if (options.realtimeStatus) {
-    return options.realtimeStatus
-  }
-
-  if (options.generatedPage && isGeneratedProjectPageStatus(options.generatedPage.status)) {
-    return 'generated'
-  }
-
-  if (options.generatedPage?.status === 'generating') {
-    return 'generating'
-  }
-
-  if (options.projectStatus === 'generating') {
-    return 'pending'
-  }
-
-  return 'pending'
-}
-
-function resolvePreviewPageTitle(options: {
-  generatedPage: ProjectPage | null
-  outlinePage: OutlinePage | null
-  pageNumber: number
-  realtimeTitle: string | null
-}): string {
-  const title = normalizeText(options.realtimeTitle)
-    || normalizeText(options.generatedPage?.title)
-    || normalizeText(options.outlinePage?.title)
-
-  return title || `第 ${options.pageNumber} 页`
-}
-
-function isGeneratedProjectPageStatus(status: PageStatus): boolean {
-  return status === 'generated' || status === 'optimizing' || status === 'confirmed'
-}
-
-function normalizeText(value: string | null | undefined): string | null {
-  const normalizedValue = value?.trim()
-  return normalizedValue ? normalizedValue : null
 }

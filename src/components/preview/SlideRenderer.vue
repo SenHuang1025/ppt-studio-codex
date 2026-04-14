@@ -13,11 +13,17 @@ const SLIDE_HEIGHT = 1080
 const LOAD_TIMEOUT_MS = 6000
 
 const props = withDefaults(defineProps<{
+  currentGenerationStageLabel?: string | null
+  generationActive?: boolean
+  generationActivePageNumber?: number | null
   pageNumber: number
   pageStatus: PreviewPageStatus
   pageTitle: string
   refreshKey?: number
 }>(), {
+  currentGenerationStageLabel: null,
+  generationActive: false,
+  generationActivePageNumber: null,
   refreshKey: 0
 })
 
@@ -75,7 +81,13 @@ const idleTitle = computed<string>(() => {
 
 const idleDescription = computed<string>(() => {
   if (props.pageStatus === 'generating') {
-    return '当前页代码正在生成中，完成后会自动接入 iframe 预览。'
+    return props.currentGenerationStageLabel
+      ? `当前页处于${props.currentGenerationStageLabel}，完成后会自动接入 iframe 预览。`
+      : '当前页代码正在生成中，完成后会自动接入 iframe 预览。'
+  }
+
+  if (props.generationActive && props.generationActivePageNumber && props.generationActivePageNumber !== props.pageNumber) {
+    return `后台正在生成第 ${props.generationActivePageNumber} 页，你可以先浏览已完成页面，轮到当前页后会自动接入预览。`
   }
 
   return '请等待逐页生成完成，或切换到已经生成的页面继续浏览。'

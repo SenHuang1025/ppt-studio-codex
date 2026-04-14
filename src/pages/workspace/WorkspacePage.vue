@@ -313,8 +313,8 @@ function resolveUiError(error: unknown, fallback = '文件操作失败，请确�
       v-else
       :active-theme-id="workspaceStore.activePreviewThemeId"
       :applying-theme-id="workspaceStore.themeApplyingId"
-      :current-generating-page-number="session.currentGeneratingPageNumber.value"
       :current-page-number="workspaceStore.currentPreviewPage"
+      :generation-progress="session.generationProgress.value"
       :items="previewPageItems"
       :theme-error="previewThemeError"
       :theme-loading="workspaceStore.themePresetsLoading"

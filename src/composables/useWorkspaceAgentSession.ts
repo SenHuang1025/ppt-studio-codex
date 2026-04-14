@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, ref, toRef, type Ref } from 'vue'
+import { computed, onBeforeUnmount, ref, toRef, watch, type Ref } from 'vue'
 import type { Router } from 'vue-router'
 import { useChatTimeline } from '@/composables/useChatTimeline'
 import { AgentSSEClient } from '@/services/sseService'
@@ -21,6 +21,7 @@ import type {
   FileParsedEventPayload,
   OutlineChatTimelineItem,
   OutlineEventPayload,
+  PageGenerationProgressChatTimelineItem,
   PageCompleteEventPayload,
   PageGeneratingEventPayload,
   StatusChatTimelineItem,
@@ -29,8 +30,18 @@ import type {
   UserChatTimelineItem
 } from '@/types/chat'
 import type { UploadedFile } from '@/types/file'
-import type { RealtimePageGenerationState } from '@/types/preview'
-import type { Outline, PageStatus } from '@/types/project'
+import type {
+  PageGenerationStage,
+  RealtimePageGenerationState,
+  WorkspaceGenerationProgressState
+} from '@/types/preview'
+import type { Outline, ProjectPage } from '@/types/project'
+import {
+  detectGenerationFallbackSummary,
+  getActivePageGenerationStageLabel,
+  isGeneratedProjectPageStatus,
+  resolvePreviewPageStatus
+} from '@/utils/preview'
 
 type WorkspaceStore = ReturnType<typeof useWorkspaceStore>
 
@@ -56,13 +67,25 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
   const currentAssistantItemId = ref<string | null>(null)
   const currentOutlineItemId = ref<string | null>(null)
   const currentDeliberationItemId = ref<string | null>(null)
+  const currentGenerationProgressItemId = ref<string | null>(null)
   const currentStreamOptimisticItemIds = ref<string[]>([])
   const deferredOptimisticCleanupAssistantId = ref<string | null>(null)
+  const currentGenerationStage = ref<PageGenerationStage | null>(null)
+  const generationError = ref<string | null>(null)
+  const latestCompletedPageNumber = ref<number | null>(null)
+  const latestCompletedPageTitle = ref<string | null>(null)
+  const pageGeneratorFallbackDetected = ref(false)
   let agentEventSequence = 0
   let sessionItemSequence = 0
   let deliberationEntrySequence = 0
 
   const timelineItems = useChatTimeline(toRef(options.workspaceStore, 'chatMessages'), sessionTimelineItems)
+  const resolvedOutline = computed<Outline | null>(() =>
+    options.workspaceStore.project?.outline ?? latestOutlineEvent.value
+  )
+  const generatedPageMap = computed<Map<number, ProjectPage>>(() =>
+    new Map(options.workspaceStore.projectPages.map((page) => [page.page_number, page]))
+  )
   const isAgentRequestInFlight = computed<boolean>(
     () => agentConnectionState.value === 'connecting' || agentConnectionState.value === 'streaming'
   )
@@ -72,12 +95,93 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
   const isConfirmingOutline = computed<boolean>(() =>
     currentStreamPurpose.value === 'confirm-outline' && isAgentRequestInFlight.value
   )
-  const currentGeneratingPageNumber = computed<number | null>(() => {
+  const totalGenerationPages = computed<number>(() => {
+    const outlineTotal = resolvedOutline.value?.total_pages ?? 0
+    const projectTotal = options.workspaceStore.project?.total_pages ?? 0
+    const highestGeneratedPageNumber = options.workspaceStore.projectPages.at(-1)?.page_number ?? 0
+    const realtimePageNumbers = Object.keys(pageGenerationStates.value)
+      .map((pageNumber) => Number(pageNumber))
+      .filter((pageNumber) => Number.isFinite(pageNumber) && pageNumber > 0)
+    const highestRealtimePageNumber = realtimePageNumbers.length > 0 ? Math.max(...realtimePageNumbers) : 0
+
+    return Math.max(outlineTotal, projectTotal, highestGeneratedPageNumber, highestRealtimePageNumber)
+  })
+  const currentGeneratingPageState = computed<RealtimePageGenerationState | null>(() => {
     const generatingEntries = Object.values(pageGenerationStates.value)
       .filter((entry) => entry.status === 'generating')
       .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
 
-    return generatingEntries[0]?.pageNumber ?? null
+    return generatingEntries[0] ?? null
+  })
+  const generationStatusCounts = computed<{ generatedCount: number; generatingCount: number; pendingCount: number }>(() => {
+    let generatedCount = 0
+    let generatingCount = 0
+
+    for (let pageNumber = 1; pageNumber <= totalGenerationPages.value; pageNumber += 1) {
+      const status = resolvePreviewPageStatus({
+        generatedPage: generatedPageMap.value.get(pageNumber) ?? null,
+        projectStatus: options.workspaceStore.project?.status,
+        realtimeState: pageGenerationStates.value[pageNumber] ?? null
+      })
+
+      if (status === 'generated') {
+        generatedCount += 1
+        continue
+      }
+
+      if (status === 'generating') {
+        generatingCount += 1
+      }
+    }
+
+    return {
+      generatedCount,
+      generatingCount,
+      pendingCount: Math.max(0, totalGenerationPages.value - generatedCount - generatingCount)
+    }
+  })
+  const generationProgress = computed<WorkspaceGenerationProgressState>(() => {
+    const isGenerationActive = !generationError.value
+      && (
+        (currentStreamPurpose.value === 'confirm-outline' && isAgentRequestInFlight.value)
+        || generationStatusCounts.value.generatingCount > 0
+      )
+    const completionRatio = totalGenerationPages.value > 0
+      ? generationStatusCounts.value.generatedCount / totalGenerationPages.value
+      : 0
+
+    return {
+      completionRatio,
+      currentGeneratingPageNumber: currentGeneratingPageState.value?.pageNumber ?? null,
+      currentGeneratingPageTitle: currentGeneratingPageState.value?.title ?? null,
+      currentGenerationStage: currentGeneratingPageState.value ? currentGenerationStage.value : null,
+      currentGenerationStageLabel: currentGeneratingPageState.value
+        ? getActivePageGenerationStageLabel(currentGenerationStage.value)
+        : null,
+      generatedCount: generationStatusCounts.value.generatedCount,
+      generationError: generationError.value,
+      generatingCount: generationStatusCounts.value.generatingCount,
+      isGenerationActive,
+      isGenerationCompleted: totalGenerationPages.value > 0
+        && generationStatusCounts.value.generatedCount >= totalGenerationPages.value
+        && !isGenerationActive
+        && !generationError.value,
+      latestCompletedPageNumber: latestCompletedPageNumber.value,
+      latestCompletedPageTitle: latestCompletedPageTitle.value,
+      pageGeneratorFallbackDetected: pageGeneratorFallbackDetected.value,
+      pendingCount: generationStatusCounts.value.pendingCount,
+      totalPages: totalGenerationPages.value,
+      visualProgressRatio: totalGenerationPages.value <= 0
+        ? 0
+        : isGenerationActive
+          ? Math.min(0.98, Math.max(completionRatio, (generationStatusCounts.value.generatedCount + 0.55) / totalGenerationPages.value))
+          : completionRatio
+    }
+  })
+  const currentGeneratingPageNumber = computed<number | null>(() => generationProgress.value.currentGeneratingPageNumber)
+
+  watch(generationProgress, (progressSnapshot) => {
+    syncGenerationProgressTimelineItem(progressSnapshot)
   })
 
   agentClient.onThinking(handleThinkingEvent)
@@ -123,6 +227,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
       return null
     }
 
+    latestOutlineEvent.value = outline
     prepareNewStream('confirm-outline', 'planner', '正在确认当前大纲，并准备切换到预览模式...')
 
     try {
@@ -173,8 +278,14 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     currentAssistantItemId.value = null
     currentOutlineItemId.value = null
     currentDeliberationItemId.value = null
+    currentGenerationProgressItemId.value = null
     currentStreamOptimisticItemIds.value = []
     deferredOptimisticCleanupAssistantId.value = null
+    currentGenerationStage.value = null
+    generationError.value = null
+    latestCompletedPageNumber.value = null
+    latestCompletedPageTitle.value = null
+    pageGeneratorFallbackDetected.value = false
     pageGenerationStates.value = {}
 
     if (options?.clearTimeline) {
@@ -229,8 +340,12 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
 
   function handlePageGeneratingEvent(payload: PageGeneratingEventPayload): void {
     agentConnectionState.value = 'streaming'
+    currentGenerationStage.value = 'draft'
     upsertPageGenerationState({
+      error: null,
+      fallbackDetected: false,
       pageNumber: payload.page_number,
+      stage: 'draft',
       status: 'generating',
       title: payload.title,
       updatedAt: new Date().toISOString()
@@ -243,11 +358,18 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
 
   function handlePageCompleteEvent(payload: PageCompleteEventPayload): void {
     agentConnectionState.value = 'streaming'
+    currentGenerationStage.value = null
+    latestCompletedPageNumber.value = payload.page_number
+    latestCompletedPageTitle.value = payload.title
     upsertPageGenerationState({
+      error: null,
+      fallbackDetected: pageGenerationStates.value[payload.page_number]?.fallbackDetected ?? false,
       pageNumber: payload.page_number,
+      stage: null,
       status: 'generated',
       title: payload.title,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      vueCode: payload.vue_code
     })
 
     if (currentStreamPurpose.value === 'confirm-outline') {
@@ -289,11 +411,26 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
 
   function handleDeliberationStarted(payload: DeliberationStartedEventPayload): void {
     agentConnectionState.value = 'streaming'
+    if (payload.target === 'page_generator') {
+      currentGenerationStage.value = 'draft'
+      updateCurrentGeneratingPageStage('draft')
+      const item = createDeliberationTimelineItem(
+        payload.target,
+        payload.rounds,
+        currentGeneratingPageState.value?.pageNumber ?? null,
+        currentGeneratingPageState.value?.title ?? null
+      )
+      currentDeliberationItemId.value = appendSessionItem(item)
+      return
+    }
+
     if (currentDeliberationItemId.value) {
       updateSessionItem(currentDeliberationItemId.value, (item) =>
         item.type === 'deliberation_message'
           ? {
               ...item,
+              pageNumber: null,
+              pageTitle: null,
               rounds: payload.rounds,
               target: payload.target
             }
@@ -302,12 +439,16 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
       return
     }
 
-    const item = createDeliberationTimelineItem(payload.target, payload.rounds)
+    const item = createDeliberationTimelineItem(payload.target, payload.rounds, null, null)
     currentDeliberationItemId.value = appendSessionItem(item)
   }
 
   function handleDeliberationRound(payload: DeliberationRoundEventPayload): void {
     agentConnectionState.value = 'streaming'
+    if (payload.target === 'page_generator') {
+      currentGenerationStage.value = resolveNextPageGenerationStage(payload.role)
+      updateCurrentGeneratingPageStage(currentGenerationStage.value)
+    }
     ensureDeliberationTimelineItem(payload.target)
     if (!currentDeliberationItemId.value) {
       return
@@ -317,6 +458,12 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
       item.type === 'deliberation_message'
         ? {
             ...item,
+            pageNumber: payload.target === 'page_generator'
+              ? currentGeneratingPageState.value?.pageNumber ?? item.pageNumber
+              : item.pageNumber,
+            pageTitle: payload.target === 'page_generator'
+              ? currentGeneratingPageState.value?.title ?? item.pageTitle
+              : item.pageTitle,
             entries: [
               ...item.entries,
               {
@@ -332,6 +479,12 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
 
   function handleDeliberationSummary(payload: DeliberationSummaryEventPayload): void {
     agentConnectionState.value = 'streaming'
+    if (payload.target === 'page_generator' && detectGenerationFallbackSummary(payload.summary)) {
+      currentGenerationStage.value = null
+      pageGeneratorFallbackDetected.value = true
+      updateCurrentGeneratingPageStage(null)
+      markCurrentGeneratingPageFallbackDetected()
+    }
     ensureDeliberationTimelineItem(payload.target)
     if (!currentDeliberationItemId.value) {
       return
@@ -341,6 +494,12 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
       item.type === 'deliberation_message'
         ? {
             ...item,
+            pageNumber: payload.target === 'page_generator'
+              ? currentGeneratingPageState.value?.pageNumber ?? item.pageNumber
+              : item.pageNumber,
+            pageTitle: payload.target === 'page_generator'
+              ? currentGeneratingPageState.value?.title ?? item.pageTitle
+              : item.pageTitle,
             summary: payload.summary
           }
         : item
@@ -351,6 +510,12 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     latestError.value = payload.message
     agentConnectionState.value = 'error'
     clearThinkingTimelineItem()
+    if (currentStreamPurpose.value === 'confirm-outline') {
+      generationError.value = payload.message
+      currentGenerationStage.value = null
+      clearActiveGeneratingStates(payload.message)
+      syncGenerationProgressTimelineItem(generationProgress.value)
+    }
     appendStatusTimelineItem('会话异常', payload.message, 'error')
   }
 
@@ -379,6 +544,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     currentAssistantItemId.value = null
     currentOutlineItemId.value = null
     currentDeliberationItemId.value = null
+    currentGenerationProgressItemId.value = null
 
     if (streamPurpose === 'confirm-outline' && !latestError.value) {
       await ensurePreviewMode()
@@ -386,18 +552,26 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
   }
 
   function handleStreamConnectionFailure(errorMessage: string): string {
+    const failedStreamPurpose = currentStreamPurpose.value
     latestError.value = errorMessage
     agentConnectionState.value = 'error'
     clearThinkingTimelineItem()
     appendStatusTimelineItem(
-      currentStreamPurpose.value === 'confirm-outline' ? '确认失败' : '会话失败',
+      failedStreamPurpose === 'confirm-outline' ? '确认失败' : '会话失败',
       errorMessage,
       'error'
     )
+    if (failedStreamPurpose === 'confirm-outline') {
+      generationError.value = errorMessage
+      currentGenerationStage.value = null
+      clearActiveGeneratingStates(errorMessage)
+      syncGenerationProgressTimelineItem(generationProgress.value)
+    }
     currentStreamPurpose.value = null
     currentAssistantItemId.value = null
     currentOutlineItemId.value = null
     currentDeliberationItemId.value = null
+    currentGenerationProgressItemId.value = null
     currentStreamOptimisticItemIds.value = []
     deferredOptimisticCleanupAssistantId.value = null
     return errorMessage
@@ -418,7 +592,15 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     currentStreamOptimisticItemIds.value = []
     deferredOptimisticCleanupAssistantId.value = null
     if (purpose === 'confirm-outline') {
+      currentGenerationStage.value = null
+      generationError.value = null
+      latestCompletedPageNumber.value = null
+      latestCompletedPageTitle.value = null
+      pageGeneratorFallbackDetected.value = false
       pageGenerationStates.value = {}
+      currentGenerationProgressItemId.value = appendSessionItem(
+        createPageGenerationProgressTimelineItem(generationProgress.value)
+      )
     }
     upsertThinkingTimelineItem(agent, content)
   }
@@ -502,6 +684,12 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
         item.type === 'deliberation_message'
           ? {
               ...item,
+              pageNumber: target === 'page_generator'
+                ? currentGeneratingPageState.value?.pageNumber ?? item.pageNumber
+                : item.pageNumber,
+              pageTitle: target === 'page_generator'
+                ? currentGeneratingPageState.value?.title ?? item.pageTitle
+                : item.pageTitle,
               target
             }
           : item
@@ -509,7 +697,12 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
       return
     }
 
-    const item = createDeliberationTimelineItem(target, null)
+    const item = createDeliberationTimelineItem(
+      target,
+      null,
+      target === 'page_generator' ? currentGeneratingPageState.value?.pageNumber ?? null : null,
+      target === 'page_generator' ? currentGeneratingPageState.value?.title ?? null : null
+    )
     currentDeliberationItemId.value = appendSessionItem(item)
   }
 
@@ -544,15 +737,33 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     }
   }
 
-  function createDeliberationTimelineItem(target: string, rounds: number | null): DeliberationChatTimelineItem {
+  function createDeliberationTimelineItem(
+    target: string,
+    rounds: number | null,
+    pageNumber: number | null,
+    pageTitle: string | null
+  ): DeliberationChatTimelineItem {
     return {
       ...createSessionMeta('deliberation'),
       dedupeKey: null,
       entries: [],
+      pageNumber,
+      pageTitle,
       rounds,
       summary: null,
       target,
       type: 'deliberation_message'
+    }
+  }
+
+  function createPageGenerationProgressTimelineItem(
+    progress: WorkspaceGenerationProgressState
+  ): PageGenerationProgressChatTimelineItem {
+    return {
+      ...createSessionMeta('page-generation-progress'),
+      dedupeKey: null,
+      progress,
+      type: 'page_generation_progress'
     }
   }
 
@@ -628,10 +839,76 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
   }
 
   function upsertPageGenerationState(nextState: RealtimePageGenerationState): void {
+    const existingState = pageGenerationStates.value[nextState.pageNumber]
     pageGenerationStates.value = {
       ...pageGenerationStates.value,
-      [nextState.pageNumber]: nextState
+      [nextState.pageNumber]: {
+        ...existingState,
+        ...nextState
+      }
     }
+  }
+
+  function syncGenerationProgressTimelineItem(progress: WorkspaceGenerationProgressState): void {
+    if (!currentGenerationProgressItemId.value) {
+      return
+    }
+
+    updateSessionItem(currentGenerationProgressItemId.value, (item) =>
+      item.type === 'page_generation_progress'
+        ? {
+            ...item,
+            progress
+          }
+        : item
+    )
+  }
+
+  function clearActiveGeneratingStates(errorMessage?: string): void {
+    let hasChanges = false
+    const nextStates: Record<number, RealtimePageGenerationState> = {}
+
+    for (const [pageNumberKey, state] of Object.entries(pageGenerationStates.value)) {
+      if (state.status === 'generating') {
+        hasChanges = true
+        nextStates[Number(pageNumberKey)] = {
+          ...state,
+          error: errorMessage ?? state.error,
+          stage: null,
+          status: 'pending',
+          updatedAt: new Date().toISOString()
+        }
+        continue
+      }
+
+      nextStates[Number(pageNumberKey)] = state
+    }
+
+    if (hasChanges) {
+      pageGenerationStates.value = nextStates
+    }
+  }
+
+  function markCurrentGeneratingPageFallbackDetected(): void {
+    if (!currentGeneratingPageState.value) {
+      return
+    }
+
+    upsertPageGenerationState({
+      ...currentGeneratingPageState.value,
+      fallbackDetected: true
+    })
+  }
+
+  function updateCurrentGeneratingPageStage(stage: PageGenerationStage | null): void {
+    if (!currentGeneratingPageState.value) {
+      return
+    }
+
+    upsertPageGenerationState({
+      ...currentGeneratingPageState.value,
+      stage
+    })
   }
 
   function hasGeneratedPreviewForPage(pageNumber: number): boolean {
@@ -678,6 +955,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     isChatSubmitting,
     isConfirmingOutline,
     currentGeneratingPageNumber,
+    generationProgress,
     latestAssistantMessage,
     latestError,
     latestOutlineEvent,
@@ -689,8 +967,16 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
   }
 }
 
-function isGeneratedProjectPageStatus(status: PageStatus): boolean {
-  return status === 'generated' || status === 'optimizing' || status === 'confirmed'
+function resolveNextPageGenerationStage(role: string): PageGenerationStage {
+  switch (role) {
+    case 'draft':
+      return 'critic'
+    case 'critic':
+      return 'synthesis'
+    case 'synthesis':
+    default:
+      return 'synthesis'
+  }
 }
 
 function summarizeAgentEvent(event: AgentStreamEvent): string {

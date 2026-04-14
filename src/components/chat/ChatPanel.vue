@@ -212,7 +212,7 @@ defineExpose({
             v-if="debugEvents.length === 0"
             class="rounded-[var(--radius-lg)] border border-dashed border-[color:var(--app-border-subtle)] px-3 py-3 text-xs leading-6 text-[color:var(--app-text-secondary)]"
           >
-            发送一轮真实请求后，这里会收集 `thinking`、`file_parsed`、`outline`、`deliberation_*`、`assistant_message` 和 `done`。
+            发送一轮真实请求后，这里会收集 `thinking`、`file_parsed`、`outline`、`deliberation_*`、`page_*`、`assistant_message` 和 `done`。
           </div>
 
           <div

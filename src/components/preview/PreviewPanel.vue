@@ -2,19 +2,20 @@
 import { computed, ref } from 'vue'
 import { NInput, NTag } from 'naive-ui'
 import GlassPanel from '@/components/common/GlassPanel.vue'
+import GenerationProgressBanner from '@/components/preview/GenerationProgressBanner.vue'
 import SlideControls from '@/components/preview/SlideControls.vue'
 import SlideRenderer from '@/components/preview/SlideRenderer.vue'
 import ThemePresetPicker from '@/components/preview/ThemePresetPicker.vue'
 import ThumbnailNav from '@/components/preview/ThumbnailNav.vue'
-import type { PreviewPageItem } from '@/types/preview'
+import type { PreviewPageItem, WorkspaceGenerationProgressState } from '@/types/preview'
 import type { ThemeConfig } from '@/types/theme'
 import { formatPreviewPageType, formatPreviewUpdatedAt, getPreviewPageStatusLabel } from '@/utils/preview'
 
 const props = withDefaults(defineProps<{
   activeThemeId: string
   applyingThemeId?: string | null
-  currentGeneratingPageNumber?: number | null
   currentPageNumber: number
+  generationProgress: WorkspaceGenerationProgressState
   themeError?: string | null
   themeLoading?: boolean
   themeSyncing?: boolean
@@ -22,7 +23,6 @@ const props = withDefaults(defineProps<{
   items: PreviewPageItem[]
 }>(), {
   applyingThemeId: null,
-  currentGeneratingPageNumber: null,
   themeError: null,
   themeLoading: false,
   themeSyncing: false
@@ -103,6 +103,7 @@ function requestCurrentPageRefresh(): void {
     <GlassPanel class="flex min-h-0 flex-col gap-4 p-4">
       <ThumbnailNav
         :current-page-number="currentPageNumber"
+        :generation-progress="generationProgress"
         :items="items"
         @select-page="emit('selectPage', $event)"
       />
@@ -128,13 +129,18 @@ function requestCurrentPageRefresh(): void {
           <NTag round :bordered="false" type="default">
             {{ currentPageVersionLabel }}
           </NTag>
-          <NTag v-if="currentGeneratingPageNumber" round :bordered="false" type="warning">
-            正在生成第 {{ currentGeneratingPageNumber }} 页
-          </NTag>
         </div>
       </div>
 
+      <GenerationProgressBanner
+        :current-page-number="currentPageItem?.pageNumber ?? currentPageNumber"
+        :progress="generationProgress"
+      />
+
       <SlideRenderer
+        :current-generation-stage-label="generationProgress.currentGenerationStageLabel"
+        :generation-active="generationProgress.isGenerationActive"
+        :generation-active-page-number="generationProgress.currentGeneratingPageNumber"
         :page-number="currentPageItem?.pageNumber ?? currentPageNumber"
         :page-status="currentPageItem?.status ?? 'pending'"
         :page-title="currentPageItem?.title ?? `第 ${currentPageNumber} 页`"
@@ -228,7 +234,7 @@ function requestCurrentPageRefresh(): void {
       </div>
 
       <div class="rounded-[var(--radius-xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)] p-4 text-sm leading-6 text-[color:var(--app-text-secondary)]">
-        本阶段重点是把预览浏览闭环补稳：真实页信息可读、翻页可持续、刷新可控。单页优化对话和版本抽屉仍留给 3.8 / 4.x。
+        本阶段重点是把预览浏览与生成反馈补稳：真实页信息可读、翻页可持续、刷新可控。单页优化对话和版本抽屉仍留给后续阶段。
       </div>
 
       <NInput

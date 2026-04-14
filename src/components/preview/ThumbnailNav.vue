@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, watch, type ComponentPublicInstance } from 'vue'
 import ThumbnailItem from './ThumbnailItem.vue'
-import type { PreviewPageItem } from '@/types/preview'
+import type { PreviewPageItem, WorkspaceGenerationProgressState } from '@/types/preview'
 
 const props = defineProps<{
   currentPageNumber: number
+  generationProgress: WorkspaceGenerationProgressState
   items: PreviewPageItem[]
 }>()
 
@@ -13,8 +14,8 @@ const emit = defineEmits<{
 }>()
 
 const itemElementMap = new Map<number, HTMLElement>()
-const generatedCount = computed<number>(() => props.items.filter((item) => item.status === 'generated').length)
-const generatingCount = computed<number>(() => props.items.filter((item) => item.status === 'generating').length)
+const generatedCount = computed<number>(() => props.generationProgress.generatedCount)
+const generatingCount = computed<number>(() => props.generationProgress.generatingCount)
 
 watch(
   [() => props.currentPageNumber, () => props.items.length],
@@ -56,12 +57,12 @@ async function scrollCurrentItemIntoView(): Promise<void> {
         <h2 class="m-0 text-base font-semibold">页面列表</h2>
       </div>
 
-      <div class="rounded-full border border-[color:var(--app-border-subtle)] bg-[rgba(255,251,243,0.86)] px-3 py-1 text-right">
-        <div class="mono-meta text-[10px] text-[color:var(--app-text-tertiary)]">
-          {{ generatedCount }} / {{ items.length || 0 }} 已可预览
-        </div>
-        <div class="text-xs text-[color:var(--app-text-secondary)]">
-          {{ generatingCount }} 页生成中
+        <div class="rounded-full border border-[color:var(--app-border-subtle)] bg-[rgba(255,251,243,0.86)] px-3 py-1 text-right">
+          <div class="mono-meta text-[10px] text-[color:var(--app-text-tertiary)]">
+            {{ generatedCount }} / {{ generationProgress.totalPages || items.length || 0 }} 已可预览
+          </div>
+          <div class="text-xs text-[color:var(--app-text-secondary)]">
+            {{ generatingCount }} 页生成中
         </div>
       </div>
     </div>
@@ -77,6 +78,7 @@ async function scrollCurrentItemIntoView(): Promise<void> {
         :ref="(element) => registerItemElement(item.pageNumber, element)"
       >
         <ThumbnailItem
+          :current-generating-page-number="generationProgress.currentGeneratingPageNumber"
           :item="item"
           :selected="currentPageNumber === item.pageNumber"
           @select="emit('selectPage', $event)"

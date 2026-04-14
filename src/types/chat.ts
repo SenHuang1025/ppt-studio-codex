@@ -1,5 +1,6 @@
 import type { FileParseStatus } from './file'
 import type { Outline } from './project'
+import type { WorkspaceGenerationProgressState } from './preview'
 
 export const CHAT_ROLE_VALUES = ['user', 'assistant', 'system'] as const
 
@@ -114,6 +115,8 @@ export interface StatusChatTimelineItem extends ChatTimelineBaseItem {
 
 export interface DeliberationChatTimelineItem extends ChatTimelineBaseItem {
   entries: ChatTimelineDeliberationEntry[]
+  pageNumber: number | null
+  pageTitle: string | null
   rounds: number | null
   summary: string | null
   target: string
@@ -126,6 +129,11 @@ export interface ThinkingChatTimelineItem extends ChatTimelineBaseItem {
   type: 'thinking'
 }
 
+export interface PageGenerationProgressChatTimelineItem extends ChatTimelineBaseItem {
+  progress: WorkspaceGenerationProgressState
+  type: 'page_generation_progress'
+}
+
 export type ChatTimelineItem =
   | UserChatTimelineItem
   | AssistantChatTimelineItem
@@ -135,6 +143,7 @@ export type ChatTimelineItem =
   | StatusChatTimelineItem
   | DeliberationChatTimelineItem
   | ThinkingChatTimelineItem
+  | PageGenerationProgressChatTimelineItem
 
 export interface ThinkingEventPayload {
   agent: string
