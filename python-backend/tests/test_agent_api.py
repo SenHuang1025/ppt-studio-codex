@@ -99,6 +99,32 @@ SYNTHESIS_RESPONSE = """
   ]
 }
 """.strip()
+VALID_SFC = """
+<script setup lang="ts">
+const highlights = ['营收增长', '续约提效', '计划推进']
+</script>
+
+<template>
+  <main class="slide-page">
+    <section class="hero">
+      <h1>经营亮点</h1>
+      <ul>
+        <li v-for="item in highlights" :key="item">{{ item }}</li>
+      </ul>
+    </section>
+  </main>
+</template>
+
+<style scoped>
+.slide-page {
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+  background: var(--slide-bg);
+  color: var(--slide-text);
+}
+</style>
+""".strip()
 
 
 @dataclass
@@ -132,6 +158,23 @@ def test_agent_chat_returns_400_when_api_key_is_missing(
         response = client.post(
             "/api/projects/project-1/agent/chat",
             json={"message": "请开始规划"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "请先在设置页配置 API Key。"
+
+
+def test_confirm_outline_returns_400_when_api_key_is_missing(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = asyncio.run(create_project(settings=settings, session_factory=session_factory, with_file=False))
+    app = build_test_app(settings=settings, session_factory=session_factory)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/projects/{project_id}/agent/confirm-outline",
+            json={},
         )
 
     assert response.status_code == 400
@@ -198,6 +241,57 @@ def test_agent_chat_streams_assistant_message_for_general_chat(
     assert response.status_code == 200
     assert [event["event"] for event in events][-1] == "done"
     assert any(event["event"] == "assistant_message" for event in events)
+
+
+def test_confirm_outline_streams_page_generation_and_persists_generated_pages(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(create_project(settings=local_settings, session_factory=session_factory, with_file=True))
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+    install_fake_runtime(
+        monkeypatch,
+        responses=[FILE_ANALYZER_RESPONSE, OUTLINE_RESPONSE, VALID_SFC, VALID_SFC, VALID_SFC],
+        deliberation_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            f"/api/projects/{project_id}/agent/chat",
+            headers={"x-ppt-studio-api-key": "test-api-key"},
+            json={"message": "请根据资料生成季度经营汇报 PPT 大纲"},
+        ) as response:
+            _ = "".join(response.iter_text())
+
+        with client.stream(
+            "POST",
+            f"/api/projects/{project_id}/agent/confirm-outline",
+            headers={"x-ppt-studio-api-key": "test-api-key"},
+            json={},
+        ) as response:
+            payload = "".join(response.iter_text())
+
+        project_response = client.get(f"/api/projects/{project_id}")
+
+    events = parse_sse_events(payload)
+    event_names = [event["event"] for event in events]
+    project_payload = project_response.json()
+
+    assert response.status_code == 200
+    assert event_names.count("page_generating") == 3
+    assert event_names.count("page_complete") == 3
+    assert event_names[-1] == "done"
+    assert project_response.status_code == 200
+    assert project_payload["status"] == "editing"
+    assert len(project_payload["pages"]) == 3
+
+    for page_number in range(1, 4):
+        preview_file = local_settings.preview_slides_dir_path / f"page-{page_number}.vue"
+        assert preview_file.exists()
+        assert preview_file.read_text(encoding="utf-8") == VALID_SFC
 
 
 def test_agent_chat_streams_deliberation_events_when_enabled(
@@ -456,3 +550,15 @@ async def load_chat_messages(
             .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
         )
         return list((await session.execute(stmt)).scalars().all())
+
+
+def build_local_settings(settings: Settings) -> Settings:
+    preview_root = settings.backend_dir / "preview-server"
+    local_settings = settings.model_copy(
+        update={
+            "preview_server_dir": preview_root,
+            "preview_slides_dir": preview_root / "src" / "slides",
+        }
+    )
+    local_settings.ensure_directories()
+    return local_settings

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, toRef, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { NButton, NInput, NSkeleton, NTag, useMessage } from 'naive-ui'
+import { useRoute, useRouter } from 'vue-router'
+import { NButton, NSkeleton, NTag, useMessage } from 'naive-ui'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
 import GlassPanel from '@/components/common/GlassPanel.vue'
 import ModeSwitchPill from '@/components/common/ModeSwitchPill.vue'
 import OutlinePanel from '@/components/outline/OutlinePanel.vue'
-import ThemePresetPicker from '@/components/preview/ThemePresetPicker.vue'
+import PreviewPanel from '@/components/preview/PreviewPanel.vue'
+import { usePreviewWorkspace } from '@/composables/usePreviewWorkspace'
 import { useWorkspaceAgentSession } from '@/composables/useWorkspaceAgentSession'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import type { WorkspaceMode } from '@/stores/workspaceStore'
@@ -21,6 +22,7 @@ const props = defineProps<{
 }>()
 
 const message = useMessage()
+const route = useRoute()
 const router = useRouter()
 const workspaceStore = useWorkspaceStore()
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
@@ -33,6 +35,22 @@ const session = useWorkspaceAgentSession({
 
 const modeLabel = computed<string>(() => (workspaceStore.currentMode === 'chat' ? '规划大纲' : '预览与调整'))
 const resolvedOutline = computed<Outline | null>(() => workspaceStore.project?.outline ?? session.latestOutlineEvent.value)
+const {
+  goToNextPage: handlePreviewNextPage,
+  goToPreviousPage: handlePreviewPreviousPage,
+  previewPageItems,
+  previewRouteQuery,
+  previewThemeError,
+  selectPage: handlePreviewSelectPage
+} = usePreviewWorkspace({
+  mode: toRef(props, 'mode'),
+  pageGenerationStates: session.pageGenerationStates,
+  projectId: toRef(props, 'projectId'),
+  resolvedOutline,
+  route,
+  router,
+  workspaceStore
+})
 const projectStatusMeta = computed(() =>
   workspaceStore.project ? PROJECT_STATUS_META[workspaceStore.project.status] : null
 )
@@ -69,24 +87,14 @@ const projectUpdatedAt = computed<string>(() =>
   workspaceStore.project ? formatProjectUpdatedAt(workspaceStore.project.updated_at) : '等待加载'
 )
 const shortProjectId = computed<string>(() => props.projectId.slice(0, 8))
-const uploadedFileCount = computed<number>(() => workspaceStore.uploadedFiles.length)
 const deletingFileIds = computed<string[]>(() =>
   workspaceStore.uploadedFiles.filter((file) => workspaceStore.isDeletingFile(file.id)).map((file) => file.id)
 )
-const previewThemeError = computed<string | null>(() => {
-  return workspaceStore.previewThemeSyncError || workspaceStore.themePresetsError
-})
-const previewPageNumbers = computed<number[]>(() => {
-  const totalPages = workspaceStore.project?.total_pages ?? 0
-  const loadedPages = workspaceStore.project?.pages.length ?? 0
-  const placeholderCount = Math.max(totalPages, loadedPages, 6)
-  return Array.from({ length: placeholderCount }, (_, index) => index + 1)
-})
 
 watch(
   () => [props.projectId, props.mode] as const,
   ([projectId, mode], previousValue) => {
-    if (!previousValue || previousValue[0] !== projectId || previousValue[1] !== mode) {
+    if (!previousValue || previousValue[0] !== projectId) {
       session.disconnect()
       session.resetRealtimeSessionState({ clearTimeline: true })
     }
@@ -106,7 +114,8 @@ function handleModeSelect(mode: WorkspaceMode): void {
 
   void router.push({
     name: mode === 'chat' ? 'project-chat' : 'project-preview',
-    params: { id: props.projectId }
+    params: { id: props.projectId },
+    query: mode === 'preview' ? previewRouteQuery.value : undefined
   })
 }
 
@@ -300,107 +309,22 @@ function resolveUiError(error: unknown, fallback = '文件操作失败，请确�
       />
     </div>
 
-    <div v-else class="grid min-h-[780px] gap-6 xl:grid-cols-[220px_minmax(0,1fr)_360px]">
-      <GlassPanel class="flex flex-col gap-4 p-4">
-        <div>
-          <p class="mono-meta mb-2 text-[color:var(--app-text-tertiary)]">缩略图轨道</p>
-          <h2 class="m-0 text-base font-semibold">页面列表</h2>
-        </div>
-
-        <button
-          v-for="pageNumber in previewPageNumbers"
-          :key="pageNumber"
-          class="rounded-[var(--radius-xl)] border p-3 text-left transition duration-250 hover:-translate-y-0.5 hover:border-[color:var(--app-border-strong)] hover:shadow-[var(--shadow-hover)]"
-          :class="
-            workspaceStore.currentPreviewPage === pageNumber
-              ? 'border-[color:var(--app-border-strong)] bg-[color:var(--app-primary-soft)] text-[color:var(--primary-300)]'
-              : 'border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)]'
-          "
-          type="button"
-          @click="workspaceStore.setPreviewPage(pageNumber)"
-        >
-          <div class="mb-2 flex items-center justify-between">
-            <span class="mono-meta text-[color:var(--app-text-tertiary)]">第 {{ pageNumber }} 页</span>
-            <span
-              class="h-2 w-2 rounded-full"
-              :class="workspaceStore.currentPreviewPage === pageNumber ? 'bg-[color:var(--accent-100)]' : 'bg-[color:var(--primary-200)]'"
-            />
-          </div>
-          <div class="aspect-[16/9] rounded-[var(--radius-lg)] bg-[linear-gradient(180deg,#fff8ed_0%,#ebe2cd_100%)]" />
-        </button>
-      </GlassPanel>
-
-      <section class="workspace-solid flex flex-col gap-5 rounded-[var(--radius-2xl)] border border-[color:var(--app-border-subtle)] p-6">
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="mono-meta mb-2 text-[color:var(--app-text-tertiary)]">稳定画布</p>
-            <h2 class="m-0 text-xl font-semibold">页面预览区</h2>
-          </div>
-          <NTag round :bordered="false" type="info">16:9 预览核心区</NTag>
-        </div>
-
-        <div class="grid flex-1 place-items-center rounded-[var(--radius-2xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-preview-stage)] p-8">
-          <div class="w-full max-w-[980px] rounded-[var(--radius-xl)] bg-[color:var(--surface-preview-stage)] shadow-[var(--shadow-canvas)]">
-            <div class="aspect-[16/9] rounded-[var(--radius-xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-canvas)] p-8">
-              <div class="flex h-full flex-col justify-between rounded-[var(--radius-lg)] border border-dashed border-[color:var(--app-border-subtle)] p-6">
-                <div>
-                  <div class="mono-meta mb-3 text-[color:var(--app-text-tertiary)]">预览画布</div>
-                  <h3 class="m-0 text-2xl font-semibold">第 {{ workspaceStore.currentPreviewPage }} 页预览骨架</h3>
-                </div>
-                <div class="text-sm leading-6 text-[color:var(--app-text-secondary)]">
-                  这里刻意保持稳定实色底板。iframe 预览、页面生成结果、翻页热更新和真实缩略图数据都会留到 Phase 3，再在这个骨架上继续接入。
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <GlassPanel variant="strong" class="flex flex-col gap-5 p-5">
-        <ThemePresetPicker
-          :active-theme-id="workspaceStore.activePreviewThemeId"
-          :applying-theme-id="workspaceStore.themeApplyingId"
-          :error="previewThemeError"
-          :loading="workspaceStore.themePresetsLoading"
-          :syncing="workspaceStore.previewThemeSyncing"
-          :themes="workspaceStore.themePresets"
-          @apply="handleThemeApply"
-          @retry="handleThemeRetry"
-        />
-
-        <div>
-          <p class="mono-meta mb-2 text-[color:var(--app-text-tertiary)]">单页优化区</p>
-          <h2 class="m-0 text-xl font-semibold">当前页操作</h2>
-          <div class="mt-2 text-sm text-[color:var(--app-text-secondary)]">当前页：第 {{ workspaceStore.currentPreviewPage }} 页</div>
-        </div>
-
-        <div class="grid gap-3">
-          <button
-            class="rounded-[var(--radius-lg)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)] px-4 py-3 text-left text-sm transition duration-250 hover:border-[color:var(--app-border-strong)] hover:bg-[color:var(--app-primary-soft)] hover:text-[color:var(--primary-300)]"
-            type="button"
-          >
-            调整版式平衡
-          </button>
-          <button
-            class="rounded-[var(--radius-lg)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)] px-4 py-3 text-left text-sm transition duration-250 hover:border-[color:var(--app-border-strong)] hover:bg-[color:var(--app-primary-soft)] hover:text-[color:var(--primary-300)]"
-            type="button"
-          >
-            替换配色强调
-          </button>
-          <button
-            class="rounded-[var(--radius-lg)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)] px-4 py-3 text-left text-sm transition duration-250 hover:border-[color:var(--app-border-strong)] hover:bg-[color:var(--app-primary-soft)] hover:text-[color:var(--primary-300)]"
-            type="button"
-          >
-            收紧叙事节奏
-          </button>
-        </div>
-
-        <div class="rounded-[var(--radius-xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)] p-4 text-sm leading-6 text-[color:var(--app-text-secondary)]">
-          绑定当前页的优化对话、快捷操作真实行为和版本历史都会放到后续阶段。当前先完成三栏骨架、页码占位和模式切换。
-        </div>
-
-        <NInput placeholder="描述你想对当前页做的修改..." size="large" />
-      </GlassPanel>
-    </div>
+    <PreviewPanel
+      v-else
+      :active-theme-id="workspaceStore.activePreviewThemeId"
+      :applying-theme-id="workspaceStore.themeApplyingId"
+      :current-generating-page-number="session.currentGeneratingPageNumber.value"
+      :current-page-number="workspaceStore.currentPreviewPage"
+      :items="previewPageItems"
+      :theme-error="previewThemeError"
+      :theme-loading="workspaceStore.themePresetsLoading"
+      :theme-syncing="workspaceStore.previewThemeSyncing"
+      :themes="workspaceStore.themePresets"
+      @apply-theme="handleThemeApply"
+      @next-page="handlePreviewNextPage"
+      @previous-page="handlePreviewPreviousPage"
+      @retry-theme="handleThemeRetry"
+      @select-page="handlePreviewSelectPage"
+    />
   </section>
 </template>

@@ -21,13 +21,16 @@ import type {
   FileParsedEventPayload,
   OutlineChatTimelineItem,
   OutlineEventPayload,
+  PageCompleteEventPayload,
+  PageGeneratingEventPayload,
   StatusChatTimelineItem,
   ThinkingChatTimelineItem,
   ThinkingEventPayload,
   UserChatTimelineItem
 } from '@/types/chat'
 import type { UploadedFile } from '@/types/file'
-import type { Outline } from '@/types/project'
+import type { RealtimePageGenerationState } from '@/types/preview'
+import type { Outline, PageStatus } from '@/types/project'
 
 type WorkspaceStore = ReturnType<typeof useWorkspaceStore>
 
@@ -47,6 +50,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
   const agentEventLog = ref<AgentEventLogItem[]>([])
   const sessionTimelineItems = ref<ChatTimelineItem[]>([])
   const activeOutlinePageNumber = ref<number | null>(null)
+  const pageGenerationStates = ref<Record<number, RealtimePageGenerationState>>({})
   const currentStreamPurpose = ref<'chat' | 'confirm-outline' | null>(null)
   const currentThinkingItemId = ref<string | null>(null)
   const currentAssistantItemId = ref<string | null>(null)
@@ -68,6 +72,13 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
   const isConfirmingOutline = computed<boolean>(() =>
     currentStreamPurpose.value === 'confirm-outline' && isAgentRequestInFlight.value
   )
+  const currentGeneratingPageNumber = computed<number | null>(() => {
+    const generatingEntries = Object.values(pageGenerationStates.value)
+      .filter((entry) => entry.status === 'generating')
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+
+    return generatingEntries[0]?.pageNumber ?? null
+  })
 
   agentClient.onThinking(handleThinkingEvent)
   agentClient.onFileParsed(handleFileParsedEvent)
@@ -75,6 +86,8 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
   agentClient.onDeliberationStarted(handleDeliberationStarted)
   agentClient.onDeliberationRound(handleDeliberationRound)
   agentClient.onDeliberationSummary(handleDeliberationSummary)
+  agentClient.onPageGenerating(handlePageGeneratingEvent)
+  agentClient.onPageComplete(handlePageCompleteEvent)
   agentClient.onAssistantMessage(handleAssistantMessageEvent)
   agentClient.onError(handleAgentErrorEvent)
   agentClient.onDone(handleAgentDone)
@@ -162,6 +175,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     currentDeliberationItemId.value = null
     currentStreamOptimisticItemIds.value = []
     deferredOptimisticCleanupAssistantId.value = null
+    pageGenerationStates.value = {}
 
     if (options?.clearTimeline) {
       sessionTimelineItems.value = []
@@ -211,6 +225,40 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     const assistantItem = createAssistantTimelineItem(payload.content)
     currentAssistantItemId.value = appendSessionItem(assistantItem)
     registerOptimisticItem(currentAssistantItemId.value)
+  }
+
+  function handlePageGeneratingEvent(payload: PageGeneratingEventPayload): void {
+    agentConnectionState.value = 'streaming'
+    upsertPageGenerationState({
+      pageNumber: payload.page_number,
+      status: 'generating',
+      title: payload.title,
+      updatedAt: new Date().toISOString()
+    })
+
+    if (currentStreamPurpose.value === 'confirm-outline') {
+      void ensurePreviewMode()
+    }
+  }
+
+  function handlePageCompleteEvent(payload: PageCompleteEventPayload): void {
+    agentConnectionState.value = 'streaming'
+    upsertPageGenerationState({
+      pageNumber: payload.page_number,
+      status: 'generated',
+      title: payload.title,
+      updatedAt: new Date().toISOString()
+    })
+
+    if (currentStreamPurpose.value === 'confirm-outline') {
+      void ensurePreviewMode()
+
+      if (!hasGeneratedPreviewForPage(options.workspaceStore.currentPreviewPage)) {
+        options.workspaceStore.setPreviewPage(payload.page_number)
+      }
+    }
+
+    void options.workspaceStore.loadProject(options.projectId.value, { force: true }).catch(() => undefined)
   }
 
   function handleOutlineEvent(payload: OutlineEventPayload): void {
@@ -333,11 +381,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     currentDeliberationItemId.value = null
 
     if (streamPurpose === 'confirm-outline' && !latestError.value) {
-      options.workspaceStore.setMode('preview')
-      await options.router.push({
-        name: 'project-preview',
-        params: { id: options.projectId.value }
-      }).catch(() => undefined)
+      await ensurePreviewMode()
     }
   }
 
@@ -373,6 +417,9 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     currentDeliberationItemId.value = null
     currentStreamOptimisticItemIds.value = []
     deferredOptimisticCleanupAssistantId.value = null
+    if (purpose === 'confirm-outline') {
+      pageGenerationStates.value = {}
+    }
     upsertThinkingTimelineItem(agent, content)
   }
 
@@ -580,6 +627,43 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     ].slice(0, 8)
   }
 
+  function upsertPageGenerationState(nextState: RealtimePageGenerationState): void {
+    pageGenerationStates.value = {
+      ...pageGenerationStates.value,
+      [nextState.pageNumber]: nextState
+    }
+  }
+
+  function hasGeneratedPreviewForPage(pageNumber: number): boolean {
+    const realtimeState = pageGenerationStates.value[pageNumber]
+    if (realtimeState?.status === 'generated') {
+      return true
+    }
+
+    const projectPage = options.workspaceStore.project?.pages.find((page) => page.page_number === pageNumber)
+    if (!projectPage) {
+      return false
+    }
+
+    return isGeneratedProjectPageStatus(projectPage.status)
+  }
+
+  async function ensurePreviewMode(): Promise<void> {
+    if (options.workspaceStore.currentMode !== 'preview') {
+      options.workspaceStore.setMode('preview')
+    }
+
+    if (options.router.currentRoute.value.name !== 'project-preview') {
+      await options.router.push({
+        name: 'project-preview',
+        params: { id: options.projectId.value },
+        query: {
+          page: String(Math.max(1, options.workspaceStore.currentPreviewPage))
+        }
+      }).catch(() => undefined)
+    }
+  }
+
   return {
     activeOutlinePageNumber,
     agentConnectionState,
@@ -593,14 +677,20 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     isAgentRequestInFlight,
     isChatSubmitting,
     isConfirmingOutline,
+    currentGeneratingPageNumber,
     latestAssistantMessage,
     latestError,
     latestOutlineEvent,
     latestThinking,
+    pageGenerationStates,
     resetRealtimeSessionState,
     setActiveOutlinePage,
     timelineItems
   }
+}
+
+function isGeneratedProjectPageStatus(status: PageStatus): boolean {
+  return status === 'generated' || status === 'optimizing' || status === 'confirmed'
 }
 
 function summarizeAgentEvent(event: AgentStreamEvent): string {
@@ -618,6 +708,10 @@ function summarizeAgentEvent(event: AgentStreamEvent): string {
         return `${event.data.role}：${event.data.content}`
       case 'deliberation_summary':
         return event.data.summary
+      case 'page_generating':
+        return `正在生成第 ${event.data.page_number} 页《${event.data.title}》`
+      case 'page_complete':
+        return `第 ${event.data.page_number} 页《${event.data.title}》已完成`
       case 'assistant_message':
         return event.data.content
       case 'error':
@@ -637,6 +731,8 @@ function isKnownAgentStreamEvent(event: AgentStreamEvent): event is Extract<Agen
     || event.event === 'deliberation_started'
     || event.event === 'deliberation_round'
     || event.event === 'deliberation_summary'
+    || event.event === 'page_generating'
+    || event.event === 'page_complete'
     || event.event === 'assistant_message'
     || event.event === 'error'
     || event.event === 'done'

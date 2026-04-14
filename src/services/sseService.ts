@@ -66,7 +66,7 @@ export class AgentSSEClient {
     this.disconnect()
 
     await this.openStream({
-      includeApiKey: false,
+      includeApiKey: true,
       payload: this.buildConfirmOutlinePayload(outline),
       url: await this.buildConfirmOutlineUrl(normalizedProjectId)
     })

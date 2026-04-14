@@ -6,7 +6,7 @@ import { projectService } from '@/services/projectService'
 import { themeService } from '@/services/themeService'
 import type { ChatMessage } from '@/types/chat'
 import type { UploadedFile } from '@/types/file'
-import type { ProjectDetailResponse } from '@/types/project'
+import type { ProjectDetailResponse, ProjectPage } from '@/types/project'
 import { MAX_UPLOAD_FILE_SIZE_BYTES, UPLOAD_FILE_EXTENSIONS } from '@/types/file'
 import { DEFAULT_PREVIEW_THEME_ID, type ThemeConfig } from '@/types/theme'
 import { getFileExtension, SUPPORTED_UPLOAD_EXTENSION_SET } from '@/utils/file'
@@ -72,6 +72,16 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const hasProject = computed<boolean>(() => project.value !== null)
   const projectName = computed<string>(() => project.value?.name ?? '未命名项目')
   const activePreviewThemeId = computed<string>(() => project.value?.theme_config?.id ?? DEFAULT_PREVIEW_THEME_ID)
+  const projectPages = computed<ProjectPage[]>(() =>
+    [...(project.value?.pages ?? [])].sort((left, right) => left.page_number - right.page_number)
+  )
+  const totalPreviewPages = computed<number>(() => {
+    const outlineTotal = project.value?.outline?.total_pages ?? 0
+    const projectTotal = project.value?.total_pages ?? 0
+    const highestGeneratedPageNumber = projectPages.value[projectPages.value.length - 1]?.page_number ?? 0
+
+    return Math.max(1, outlineTotal, projectTotal, highestGeneratedPageNumber)
+  })
 
   let lastLoadToken = 0
   let lastFilesLoadToken = 0
@@ -461,10 +471,21 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function syncPreviewPage(projectDetail: ProjectDetailResponse): void {
-    const availablePages = Math.max(projectDetail.total_pages, projectDetail.pages.length)
+    const highestGeneratedPageNumber = projectDetail.pages.reduce((maxPageNumber, page) =>
+      Math.max(maxPageNumber, page.page_number), 0)
+    const availablePages = Math.max(
+      projectDetail.total_pages,
+      projectDetail.outline?.total_pages ?? 0,
+      highestGeneratedPageNumber
+    )
 
     if (availablePages <= 0) {
       currentPreviewPage.value = 1
+      return
+    }
+
+    if (currentPreviewPage.value < 1 || currentPreviewPage.value > availablePages) {
+      currentPreviewPage.value = Math.min(Math.max(1, currentPreviewPage.value), availablePages)
       return
     }
 
@@ -525,6 +546,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     projectLoaded,
     projectLoading,
     projectName,
+    projectPages,
     previewThemeSyncError,
     previewThemeSyncing,
     refreshChatMessages,
@@ -538,6 +560,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     themePresetsError,
     themePresetsLoaded,
     themePresetsLoading,
+    totalPreviewPages,
     uploadedFiles,
     uploadFiles: uploadFilesForProject
   }

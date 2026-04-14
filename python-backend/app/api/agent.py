@@ -2,20 +2,38 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 from sse_starlette import EventSourceResponse
 
 from app.agents import API_KEY_HEADER, AgentGraphContext, build_llm_runtime, run_agent_workflow
+from app.agents.page_generator import generate_page_code
 from app.agents.llm import LLMConfigurationError, MissingAPIKeyError
 from app.api.chat import get_chat_service
 from app.api.files import get_file_service
+from app.api.pages import get_page_service
 from app.api.projects import get_project_service
 from app.api.settings import get_settings_service
-from app.schemas import AgentChatRequest, AgentConfirmOutlineRequest, OutlineSchema
-from app.services import ChatService, FileService, ProjectNotFoundError, ProjectService, SSEManager, SettingsService
+from app.api.themes import get_theme_service
+from app.schemas import (
+    AgentChatRequest,
+    AgentConfirmOutlineRequest,
+    OutlineSchema,
+    ProjectStatus,
+    ProjectUpdate,
+)
+from app.services import (
+    ChatService,
+    FileService,
+    PageService,
+    ProjectNotFoundError,
+    ProjectService,
+    SSEManager,
+    SettingsService,
+    ThemeService,
+)
 
 router = APIRouter(prefix="/api/projects/{project_id}/agent", tags=["agent"])
 
@@ -97,20 +115,38 @@ async def confirm_outline(
     payload: AgentConfirmOutlineRequest,
     request: Request,
     chat_service: ChatService = Depends(get_chat_service),
+    file_service: FileService = Depends(get_file_service),
+    page_service: PageService = Depends(get_page_service),
     project_service: ProjectService = Depends(get_project_service),
+    settings_service: SettingsService = Depends(get_settings_service),
     sse_manager: SSEManager = Depends(get_sse_manager),
+    theme_service: ThemeService = Depends(get_theme_service),
 ) -> EventSourceResponse:
+    api_key = request.headers.get(API_KEY_HEADER, "").strip()
+
+    try:
+        llm_runtime = await build_llm_runtime(
+            settings_service=settings_service,
+            api_key=api_key,
+        )
+    except Exception as exc:
+        _raise_agent_http_error(exc)
+
     stream_id, stream = await sse_manager.open_stream(project_id)
 
     async def stream_response() -> AsyncGenerator[object, None]:
         producer_task = asyncio.create_task(
             _produce_confirm_outline_events(
                 chat_service=chat_service,
+                file_service=file_service,
+                llm_runtime=llm_runtime,
+                page_service=page_service,
                 project_id=project_id,
                 project_service=project_service,
                 request_payload=payload,
                 sse_manager=sse_manager,
                 stream_id=stream_id,
+                theme_service=theme_service,
             )
         )
 
@@ -217,13 +253,20 @@ async def _produce_agent_events(
 async def _produce_confirm_outline_events(
     *,
     chat_service: ChatService,
+    file_service: FileService,
+    llm_runtime: object,
+    page_service: PageService,
     project_id: str,
     project_service: ProjectService,
     request_payload: AgentConfirmOutlineRequest,
     sse_manager: SSEManager,
     stream_id: str,
+    theme_service: ThemeService,
 ) -> None:
     cancelled = False
+
+    async def sse_callback(event: str, data: dict[str, object]) -> None:
+        await sse_manager.send_event(project_id, event, data, stream_id=stream_id)
 
     try:
         project = await project_service.get_project_detail(project_id)
@@ -242,7 +285,12 @@ async def _produce_confirm_outline_events(
         outline_schema = (
             resolved_outline if isinstance(resolved_outline, OutlineSchema) else OutlineSchema.model_validate(resolved_outline)
         )
-        await project_service.save_outline(project_id, outline_schema)
+        project = await project_service.save_outline(project_id, outline_schema)
+        project = await project_service.update_project(
+            project_id,
+            ProjectUpdate(status=ProjectStatus.GENERATING),
+        )
+        project = await project_service.get_project_detail(project_id)
 
         assistant_message = _build_confirm_outline_message(outline_schema)
         await chat_service.create_message(
@@ -257,6 +305,68 @@ async def _produce_confirm_outline_events(
             "assistant_message",
             {"content": assistant_message},
             stream_id=stream_id,
+        )
+
+        parsed_contents = await _load_page_generation_sources(
+            file_service=file_service,
+            project_id=project_id,
+        )
+        resolved_theme = theme_service.resolve_theme(project.theme_config)
+        theme_service.write_preview_theme(resolved_theme)
+        existing_page_code_map = {
+            page.page_number: getattr(page, "vue_code", None)
+            for page in getattr(project, "pages", []) or []
+        }
+
+        for outline_page in outline_schema.pages:
+            page_generation_context = page_service.build_page_generation_context(
+                project=project,
+                outline_page=outline_page,
+                parsed_contents=parsed_contents,
+            )
+            page_code = await generate_page_code(
+                project=project,
+                outline_page=outline_page,
+                parsed_contents=parsed_contents,
+                theme_config=resolved_theme,
+                current_page_number=outline_page.page_number,
+                total_pages=outline_schema.total_pages,
+                existing_page_code=existing_page_code_map.get(outline_page.page_number),
+                model=llm_runtime.chat_model,
+                deliberation_enabled=llm_runtime.settings.multi_agent_deliberation_enabled,
+                sse_callback=sse_callback,
+                page_generation_context=page_generation_context,
+            )
+
+            page_service.write_preview_slide(
+                page_number=outline_page.page_number,
+                vue_code=page_code,
+            )
+            await page_service.upsert_generated_page(
+                project_id=project_id,
+                page_number=outline_page.page_number,
+                title=outline_page.title,
+                page_type=outline_page.type,
+                vue_code=page_code,
+            )
+            existing_page_code_map[outline_page.page_number] = page_code
+
+            await _safe_send_event(
+                sse_manager,
+                project_id,
+                "page_complete",
+                {
+                    "page_number": outline_page.page_number,
+                    "title": outline_page.title,
+                    "status": "generated",
+                    "vue_code": page_code,
+                },
+                stream_id=stream_id,
+            )
+
+        await project_service.update_project(
+            project_id,
+            ProjectUpdate(status=ProjectStatus.EDITING),
         )
     except asyncio.CancelledError:
         cancelled = True
@@ -312,8 +422,54 @@ async def _safe_send_event(
 def _build_confirm_outline_message(outline: OutlineSchema) -> str:
     return (
         f"已确认《{outline.title}》的 {outline.total_pages} 页大纲。"
-        "预览模式已切换；正式页面生成将在后续阶段接入。"
+        "现在开始逐页生成，请切换到预览模式查看实时结果。"
     )
+
+
+async def _load_page_generation_sources(
+    *,
+    file_service: FileService,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    uploaded_files = await file_service.list_files(project_id)
+    sources: list[dict[str, Any]] = []
+
+    for uploaded_file in uploaded_files:
+        parsed_content = uploaded_file.parsed_content or {}
+        sources.append(
+            {
+                "file_id": uploaded_file.id,
+                "file_name": uploaded_file.original_name,
+                "file_type": uploaded_file.file_type,
+                "summary": _normalized_text(parsed_content.get("summary")),
+                "key_points": _normalized_string_list(parsed_content.get("key_points")),
+                "structured_data": parsed_content.get("structured_data")
+                if isinstance(parsed_content.get("structured_data"), dict)
+                else {},
+                "text_content": _normalized_text(parsed_content.get("text_content")),
+            }
+        )
+
+    return sources
+
+
+def _normalized_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _normalized_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            stripped = item.strip()
+            if stripped:
+                normalized.append(stripped)
+    return normalized
 
 
 async def _persist_assistant_message(
