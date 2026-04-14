@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import {
+  PREVIEW_SERVER_GET_BASE_URL_CHANNEL,
+  PREVIEW_SERVER_GET_SLIDES_DIR_CHANNEL,
   PYTHON_SIDECAR_GET_BASE_URL_CHANNEL,
   SETTINGS_CLEAR_API_KEY_CHANNEL,
   SETTINGS_GET_API_KEY_CHANNEL,
@@ -15,6 +17,8 @@ contextBridge.exposeInMainWorld('pptStudio', {
   },
   clearApiKey: (): Promise<void> => ipcRenderer.invoke(SETTINGS_CLEAR_API_KEY_CHANNEL),
   getApiKey: (): Promise<string | null> => ipcRenderer.invoke(SETTINGS_GET_API_KEY_CHANNEL),
+  getPreviewBaseUrl: (): Promise<string> => ipcRenderer.invoke(PREVIEW_SERVER_GET_BASE_URL_CHANNEL),
+  getPreviewSlidesDir: (): Promise<string> => ipcRenderer.invoke(PREVIEW_SERVER_GET_SLIDES_DIR_CHANNEL),
   getPythonBaseUrl: (): Promise<string> => ipcRenderer.invoke(PYTHON_SIDECAR_GET_BASE_URL_CHANNEL),
   saveApiKey: (apiKey: string): Promise<void> => ipcRenderer.invoke(SETTINGS_SET_API_KEY_CHANNEL, apiKey)
 })

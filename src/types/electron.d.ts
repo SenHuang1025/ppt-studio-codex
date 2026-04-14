@@ -7,6 +7,8 @@ export interface PptStudioRuntime {
   }>
   clearApiKey: () => Promise<void>
   getApiKey: () => Promise<string | null>
+  getPreviewBaseUrl: () => Promise<string>
+  getPreviewSlidesDir: () => Promise<string>
   getPythonBaseUrl: () => Promise<string>
   saveApiKey: (apiKey: string) => Promise<void>
 }

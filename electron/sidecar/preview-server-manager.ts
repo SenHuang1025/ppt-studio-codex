@@ -1,3 +1,4 @@
+import { access } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import net from 'node:net'
 import path from 'node:path'
@@ -8,24 +9,19 @@ import { app } from 'electron'
 
 const execFileAsync = promisify(execFile)
 
-const PYTHON_HOST = '127.0.0.1'
-const PYTHON_PORT = 18922
-const START_TIMEOUT_MS = 30_000
+const PREVIEW_HOST = '127.0.0.1'
+const PREVIEW_PORT = 18921
+const START_TIMEOUT_MS = 25_000
 const HEALTH_CHECK_INTERVAL_MS = 500
 const STOP_TIMEOUT_MS = 5_000
+const PREVIEW_HEALTH_MARKER = 'ppt-studio-preview-service'
 
-interface PythonSidecarOptions {
-  extraEnv?: Record<string, string | undefined>
-}
-
-export class PythonSidecar {
+export class PreviewServerManager {
   private process: ChildProcessWithoutNullStreams | null = null
   private startPromise: Promise<void> | null = null
   private stopPromise: Promise<void> | null = null
   private usingExistingService = false
-  private readonly baseUrl = `http://${PYTHON_HOST}:${PYTHON_PORT}`
-
-  public constructor(private readonly options: PythonSidecarOptions = {}) {}
+  private readonly baseUrl = `http://${PREVIEW_HOST}:${PREVIEW_PORT}`
 
   public async start(): Promise<void> {
     if (this.isRunning()) {
@@ -40,24 +36,19 @@ export class PythonSidecar {
 
     if (existingServiceMode === 'reuse') {
       this.usingExistingService = true
-      this.log('info', `Reusing existing Python sidecar at ${this.baseUrl}`)
+      this.log('info', `Reusing existing preview server at ${this.baseUrl}`)
       return
     }
 
-    const backendDirectory = this.resolveBackendDirectory()
+    const previewDirectory = this.resolvePreviewDirectory()
+    await Promise.all([access(previewDirectory), access(this.getSlidesDir())])
     this.usingExistingService = false
 
     this.startPromise = new Promise<void>((resolve, reject) => {
-      const child = spawn('uv', ['run', 'fastapi', 'dev', 'app/main.py', '--port', String(PYTHON_PORT)], {
-        cwd: backendDirectory,
+      const child = spawn(this.resolvePnpmCommand(), ['dev'], {
+        cwd: previewDirectory,
         env: {
-          ...process.env,
-          ...this.options.extraEnv,
-          PPT_STUDIO_ENV: 'development',
-          PPT_STUDIO_HOST: PYTHON_HOST,
-          PPT_STUDIO_PORT: String(PYTHON_PORT),
-          PYTHONIOENCODING: 'utf-8',
-          PYTHONUTF8: '1'
+          ...process.env
         },
         stdio: 'pipe',
         windowsHide: true,
@@ -75,18 +66,18 @@ export class PythonSidecar {
       })
 
       child.once('spawn', () => {
-        this.log('info', `Started Python sidecar from ${backendDirectory} (pid=${child.pid ?? 'unknown'})`)
+        this.log('info', `Started preview server from ${previewDirectory} (pid=${child.pid ?? 'unknown'})`)
         resolve()
       })
 
       child.once('error', (error: Error) => {
-        this.log('error', `Failed to start Python sidecar: ${error.message}`)
+        this.log('error', `Failed to start preview server: ${error.message}`)
         this.process = null
         reject(error)
       })
 
       child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-        const message = `Python sidecar exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
+        const message = `Preview server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
 
         if (code === 0 || signal === 'SIGTERM' || signal === 'SIGINT') {
           this.log('info', message)
@@ -127,40 +118,39 @@ export class PythonSidecar {
 
   public async waitForReady(timeoutMs = START_TIMEOUT_MS): Promise<void> {
     const deadline = Date.now() + timeoutMs
-    const healthUrl = new URL('/health', this.baseUrl).toString()
 
     while (Date.now() < deadline) {
       if (!this.isRunning() && !this.startPromise) {
-        throw new Error('Python sidecar exited before becoming ready.')
+        throw new Error('Preview server exited before becoming ready.')
       }
 
       try {
-        const response = await fetch(healthUrl, {
-          signal: AbortSignal.timeout(1_000)
-        })
-
-        if (response.ok) {
-          const payload = (await response.json()) as { status?: string }
-
-          if (payload.status === 'ok') {
-            this.log('info', `Python sidecar is ready at ${healthUrl}`)
-            return
-          }
+        if (await this.checkExistingServiceHealth()) {
+          this.log('info', `Preview server is ready at ${this.baseUrl}/`)
+          return
         }
       } catch {
-        // Ignore transient connection failures while the backend is still starting.
+        // Ignore transient connection failures while the preview server is still starting.
       }
 
       await delay(HEALTH_CHECK_INTERVAL_MS)
     }
 
-    const error = new Error(`Python sidecar health check timed out after ${timeoutMs}ms.`)
+    const error = new Error(`Preview server health check timed out after ${timeoutMs}ms.`)
     this.log('error', error.message)
     throw error
   }
 
   public getBaseUrl(): string {
     return this.baseUrl
+  }
+
+  public getSlidesDir(): string {
+    return path.join(this.resolvePreviewDirectory(), 'src', 'slides')
+  }
+
+  public getThemeFile(): string {
+    return path.join(this.resolvePreviewDirectory(), 'src', 'theme', 'variables.css')
   }
 
   private async stopProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -178,7 +168,7 @@ export class PythonSidecar {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      this.log('warn', `Initial Python sidecar shutdown signal failed: ${message}`)
+      this.log('warn', `Initial preview server shutdown signal failed: ${message}`)
     }
 
     const exited = await this.waitForExit(child, STOP_TIMEOUT_MS)
@@ -195,14 +185,14 @@ export class PythonSidecar {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      this.log('error', `Failed to force stop Python sidecar: ${message}`)
+      this.log('error', `Failed to force stop preview server: ${message}`)
       throw error
     }
 
     const forceExited = await this.waitForExit(child, STOP_TIMEOUT_MS)
 
     if (!forceExited) {
-      const error = new Error('Python sidecar did not exit after forced shutdown.')
+      const error = new Error('Preview server did not exit after forced shutdown.')
       this.log('error', error.message)
       throw error
     }
@@ -251,7 +241,7 @@ export class PythonSidecar {
     }
 
     const error = new Error(
-      `Python sidecar port ${PYTHON_PORT} is already in use, but the existing service did not pass the PPT Studio health check. Stop the conflicting process before launching Electron.`
+      `Preview server port ${PREVIEW_PORT} is already in use, but the existing service did not pass the PPT Studio preview health check. Stop the conflicting process before launching Electron.`
     )
     this.log('error', error.message)
     throw error
@@ -260,8 +250,8 @@ export class PythonSidecar {
   private async checkPortInUse(): Promise<boolean> {
     return new Promise<boolean>((resolve, reject) => {
       const socket = net.createConnection({
-        host: PYTHON_HOST,
-        port: PYTHON_PORT
+        host: PREVIEW_HOST,
+        port: PREVIEW_PORT
       })
 
       const cleanup = () => {
@@ -294,7 +284,7 @@ export class PythonSidecar {
 
   private async checkExistingServiceHealth(): Promise<boolean> {
     try {
-      const response = await fetch(new URL('/health', this.baseUrl), {
+      const response = await fetch(new URL('/', this.baseUrl), {
         signal: AbortSignal.timeout(1_500)
       })
 
@@ -302,19 +292,29 @@ export class PythonSidecar {
         return false
       }
 
-      const payload = (await response.json()) as { status?: string }
-      return payload.status === 'ok'
+      const contentType = response.headers.get('content-type') ?? ''
+
+      if (!contentType.includes('text/html')) {
+        return false
+      }
+
+      const payload = await response.text()
+      return payload.includes(PREVIEW_HEALTH_MARKER)
     } catch {
       return false
     }
   }
 
-  private resolveBackendDirectory(): string {
+  private resolvePreviewDirectory(): string {
     if (app.isPackaged) {
-      return path.join(process.resourcesPath, 'python-backend')
+      return path.join(process.resourcesPath, 'ppt-preview-server')
     }
 
-    return path.join(app.getAppPath(), 'python-backend')
+    return path.join(app.getAppPath(), 'ppt-preview-server')
+  }
+
+  private resolvePnpmCommand(): string {
+    return process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
   }
 
   private log(level: 'info' | 'warn' | 'error', message: string): void {
@@ -324,7 +324,7 @@ export class PythonSidecar {
       return
     }
 
-    const formattedMessage = `[PythonSidecar] ${normalizedMessage}`
+    const formattedMessage = `[PreviewServer] ${normalizedMessage}`
 
     if (level === 'error') {
       console.error(formattedMessage)

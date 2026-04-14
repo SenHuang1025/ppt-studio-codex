@@ -1,4 +1,6 @@
 export const PYTHON_SIDECAR_GET_BASE_URL_CHANNEL = 'python-sidecar:get-base-url'
+export const PREVIEW_SERVER_GET_BASE_URL_CHANNEL = 'preview-server:get-base-url'
+export const PREVIEW_SERVER_GET_SLIDES_DIR_CHANNEL = 'preview-server:get-slides-dir'
 export const SETTINGS_CLEAR_API_KEY_CHANNEL = 'settings:clear-api-key'
 export const SETTINGS_GET_API_KEY_CHANNEL = 'settings:get-api-key'
 export const SETTINGS_SET_API_KEY_CHANNEL = 'settings:set-api-key'

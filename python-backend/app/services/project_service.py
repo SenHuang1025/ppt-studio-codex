@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import Settings
 from app.models import Project
-from app.schemas import OutlineSchema, ProjectCreate, ProjectStatus, ProjectUpdate
+from app.schemas import OutlineSchema, ProjectCreate, ProjectStatus, ProjectUpdate, ThemeConfig
 
 
 class ProjectServiceError(Exception):
@@ -137,6 +137,29 @@ class ProjectService:
             ) from exc
 
         logger.info("Saved outline for project {}", project_id)
+        return project
+
+    async def save_theme_config(
+        self,
+        project_id: str,
+        theme_config: ThemeConfig | dict[str, object],
+    ) -> Project:
+        project = await self._get_project_or_raise(project_id)
+        theme_schema = (
+            theme_config if isinstance(theme_config, ThemeConfig) else ThemeConfig.model_validate(theme_config)
+        )
+        project.theme_config = theme_schema.model_dump(mode="json")
+
+        try:
+            await self.session.commit()
+            await self.session.refresh(project)
+        except SQLAlchemyError as exc:
+            await self.session.rollback()
+            raise ProjectStorageError(
+                f"Failed to persist theme for project '{project_id}'.",
+            ) from exc
+
+        logger.info("Saved theme config for project {}", project_id)
         return project
 
     async def delete_project(self, project_id: str) -> None:

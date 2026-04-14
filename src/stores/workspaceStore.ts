@@ -3,10 +3,12 @@ import { defineStore } from 'pinia'
 import { chatService, type ChatMessageListOptions } from '@/services/chatService'
 import { fileService } from '@/services/fileService'
 import { projectService } from '@/services/projectService'
+import { themeService } from '@/services/themeService'
 import type { ChatMessage } from '@/types/chat'
 import type { UploadedFile } from '@/types/file'
 import type { ProjectDetailResponse } from '@/types/project'
 import { MAX_UPLOAD_FILE_SIZE_BYTES, UPLOAD_FILE_EXTENSIONS } from '@/types/file'
+import { DEFAULT_PREVIEW_THEME_ID, type ThemeConfig } from '@/types/theme'
 import { getFileExtension, SUPPORTED_UPLOAD_EXTENSION_SET } from '@/utils/file'
 
 export type WorkspaceMode = 'chat' | 'preview'
@@ -25,6 +27,14 @@ interface LoadFilesOptions {
 }
 
 interface LoadChatMessagesOptions extends ChatMessageListOptions {
+  force?: boolean
+}
+
+interface LoadThemePresetsOptions {
+  force?: boolean
+}
+
+interface SyncPreviewThemeOptions {
   force?: boolean
 }
 
@@ -51,14 +61,23 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const chatMessagesLoading = ref(false)
   const chatMessagesLoaded = ref(false)
   const chatMessagesError = ref<string | null>(null)
+  const themePresets = ref<ThemeConfig[]>([])
+  const themePresetsLoading = ref(false)
+  const themePresetsLoaded = ref(false)
+  const themePresetsError = ref<string | null>(null)
+  const themeApplyingId = ref<string | null>(null)
+  const previewThemeSyncing = ref(false)
+  const previewThemeSyncError = ref<string | null>(null)
 
   const hasProject = computed<boolean>(() => project.value !== null)
   const projectName = computed<string>(() => project.value?.name ?? '未命名项目')
+  const activePreviewThemeId = computed<string>(() => project.value?.theme_config?.id ?? DEFAULT_PREVIEW_THEME_ID)
 
   let lastLoadToken = 0
   let lastFilesLoadToken = 0
   let lastChatMessagesLoadToken = 0
   let lastChatMessagesOptions: ChatMessageListOptions = {}
+  let lastPreviewThemeSyncKey: string | null = null
 
   async function initializeWorkspace(payload: InitializeWorkspacePayload): Promise<void> {
     const normalizedProjectId = payload.projectId.trim()
@@ -72,6 +91,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       project.value = null
       projectLoaded.value = false
       projectError.value = null
+      previewThemeSyncError.value = null
+      themeApplyingId.value = null
+      lastPreviewThemeSyncKey = null
       resetFileState()
       resetChatMessageState()
     }
@@ -85,6 +107,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     await loadChatMessages(normalizedProjectId, {
       force: projectChanged || !chatMessagesLoaded.value
     })
+
+    if (payload.mode === 'preview') {
+      await Promise.all([
+        loadThemePresets().catch(() => undefined),
+        syncPreviewTheme({ force: projectChanged }).catch(() => undefined)
+      ])
+    }
   }
 
   async function loadProject(projectId: string, options?: LoadProjectOptions): Promise<ProjectDetailResponse | null> {
@@ -193,6 +222,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     await loadProject(projectId, { force: true })
     await loadFiles(projectId, { force: true })
     await loadChatMessages(projectId, { ...lastChatMessagesOptions, force: true })
+
+    if (currentMode.value === 'preview') {
+      await Promise.all([
+        loadThemePresets().catch(() => undefined),
+        syncPreviewTheme({ force: true }).catch(() => undefined)
+      ])
+    }
   }
 
   async function loadChatMessages(
@@ -256,6 +292,83 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       ...lastChatMessagesOptions,
       force: true
     })
+  }
+
+  async function loadThemePresets(options?: LoadThemePresetsOptions): Promise<ThemeConfig[]> {
+    if (!options?.force && themePresetsLoaded.value) {
+      return themePresets.value
+    }
+
+    themePresetsLoading.value = true
+    themePresetsError.value = null
+
+    try {
+      const response = await themeService.list()
+      themePresets.value = response.themes
+      themePresetsLoaded.value = true
+      return themePresets.value
+    } catch (error: unknown) {
+      themePresetsError.value = normalizeWorkspaceError(error)
+
+      if (!themePresetsLoaded.value) {
+        themePresets.value = []
+      }
+
+      throw error
+    } finally {
+      themePresetsLoading.value = false
+    }
+  }
+
+  async function syncPreviewTheme(options?: SyncPreviewThemeOptions): Promise<ThemeConfig> {
+    const projectId = requireCurrentProjectId()
+    const syncKey = buildPreviewThemeSyncKey(projectId, activePreviewThemeId.value)
+
+    if (!options?.force && lastPreviewThemeSyncKey === syncKey) {
+      const cachedTheme = themePresets.value.find((theme) => theme.id === activePreviewThemeId.value)
+
+      if (cachedTheme) {
+        return cachedTheme
+      }
+    }
+
+    previewThemeSyncing.value = true
+    previewThemeSyncError.value = null
+
+    try {
+      const response = await projectService.syncTheme(projectId)
+      lastPreviewThemeSyncKey = buildPreviewThemeSyncKey(projectId, response.theme.id)
+      return response.theme
+    } catch (error: unknown) {
+      previewThemeSyncError.value = normalizeWorkspaceError(error)
+      lastPreviewThemeSyncKey = null
+      throw error
+    } finally {
+      previewThemeSyncing.value = false
+    }
+  }
+
+  async function applyTheme(themeConfig: ThemeConfig): Promise<ProjectDetailResponse> {
+    const projectId = requireCurrentProjectId()
+    themeApplyingId.value = themeConfig.id
+    previewThemeSyncError.value = null
+
+    try {
+      const updatedProject = await projectService.updateTheme(projectId, themeConfig)
+      project.value = updatedProject
+      projectLoaded.value = true
+      syncPreviewPage(updatedProject)
+      lastPreviewThemeSyncKey = buildPreviewThemeSyncKey(
+        updatedProject.id,
+        updatedProject.theme_config?.id ?? DEFAULT_PREVIEW_THEME_ID
+      )
+      return updatedProject
+    } catch (error: unknown) {
+      previewThemeSyncError.value = normalizeWorkspaceError(error)
+      throw error
+    } finally {
+      themeApplyingId.value = null
+    }
   }
 
   async function uploadFilesForProject(selectedFiles: File[]): Promise<UploadFilesResult> {
@@ -339,6 +452,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     projectLoading.value = false
     projectLoaded.value = false
     projectError.value = null
+    previewThemeSyncing.value = false
+    previewThemeSyncError.value = null
+    themeApplyingId.value = null
+    lastPreviewThemeSyncKey = null
     resetFileState()
     resetChatMessageState()
   }
@@ -394,22 +511,33 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     currentMode,
     currentPreviewPage,
     currentProjectId,
+    activePreviewThemeId,
+    applyTheme,
     hasProject,
     initializeWorkspace,
     isDeletingFile,
     loadChatMessages,
     loadFiles,
     loadProject,
+    loadThemePresets,
     project,
     projectError,
     projectLoaded,
     projectLoading,
     projectName,
+    previewThemeSyncError,
+    previewThemeSyncing,
     refreshChatMessages,
     refreshWorkspace,
     resetWorkspace,
     setMode,
     setPreviewPage,
+    syncPreviewTheme,
+    themeApplyingId,
+    themePresets,
+    themePresetsError,
+    themePresetsLoaded,
+    themePresetsLoading,
     uploadedFiles,
     uploadFiles: uploadFilesForProject
   }
@@ -504,4 +632,8 @@ function sortUploadedFiles(files: UploadedFile[]): UploadedFile[] {
 
     return right.id.localeCompare(left.id)
   })
+}
+
+function buildPreviewThemeSyncKey(projectId: string, themeId: string): string {
+  return `${projectId}:${themeId}`
 }

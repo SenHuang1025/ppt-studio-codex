@@ -8,6 +8,7 @@ import type {
   ProjectStatus,
   ProjectUpdatePayload
 } from '../types/project'
+import type { ThemeConfig, ThemeSyncResponse } from '../types/theme'
 
 export interface ProjectListParams {
   order?: 'asc' | 'desc'
@@ -40,6 +41,16 @@ export const projectService = {
     return apiClient.patch<Project>(encodeProjectPath(projectId), {
       body: payload
     })
+  },
+
+  updateTheme(projectId: string, payload: ThemeConfig): Promise<ProjectDetailResponse> {
+    return apiClient.put<ProjectDetailResponse>(`${encodeProjectPath(projectId)}/theme`, {
+      body: payload
+    })
+  },
+
+  syncTheme(projectId: string): Promise<ThemeSyncResponse> {
+    return apiClient.post<ThemeSyncResponse>(`${encodeProjectPath(projectId)}/theme/sync`)
   },
 
   remove(projectId: string): Promise<ProjectDeleteResponse> {

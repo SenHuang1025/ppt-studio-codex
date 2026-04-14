@@ -38,6 +38,8 @@ export const AGENT_SSE_EVENT_NAMES = [
   'deliberation_started',
   'deliberation_round',
   'deliberation_summary',
+  'page_generating',
+  'page_complete',
   'assistant_message',
   'error',
   'done'
@@ -165,6 +167,19 @@ export interface DeliberationSummaryEventPayload {
   target: string
 }
 
+export interface PageGeneratingEventPayload {
+  page_number: number
+  status: string
+  title: string
+}
+
+export interface PageCompleteEventPayload {
+  page_number: number
+  status: string
+  title: string
+  vue_code: string
+}
+
 export interface AssistantMessageEventPayload {
   content: string
 }
@@ -182,6 +197,8 @@ export interface AgentSSEEventMap {
   deliberation_started: DeliberationStartedEventPayload
   deliberation_round: DeliberationRoundEventPayload
   deliberation_summary: DeliberationSummaryEventPayload
+  page_generating: PageGeneratingEventPayload
+  page_complete: PageCompleteEventPayload
   assistant_message: AssistantMessageEventPayload
   error: ErrorEventPayload
   done: DoneEventPayload

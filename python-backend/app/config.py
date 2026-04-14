@@ -20,6 +20,9 @@ class Settings(BaseModel):
     log_dir: Path
     database_filename: str = "ppt_studio.db"
     sql_echo: bool = False
+    preview_server_dir: Path | None = None
+    preview_slides_dir: Path | None = None
+    preview_theme_file_override: Path | None = None
     cors_allow_origins: tuple[str, ...] = (
         "http://127.0.0.1:5173",
         "http://localhost:5173",
@@ -38,6 +41,9 @@ class Settings(BaseModel):
             if data_dir_raw
             else backend_dir / "data"
         )
+        preview_slides_dir_raw = getenv("PPT_STUDIO_PREVIEW_SLIDES_DIR")
+        preview_server_dir_raw = getenv("PPT_STUDIO_PREVIEW_SERVER_DIR")
+        preview_theme_file_raw = getenv("PPT_STUDIO_PREVIEW_THEME_FILE")
         port_raw = getenv("PPT_STUDIO_PORT")
         sql_echo_raw = getenv("PPT_STUDIO_SQL_ECHO", "0").strip().lower()
 
@@ -48,6 +54,21 @@ class Settings(BaseModel):
             backend_dir=backend_dir,
             data_dir=data_dir,
             log_dir=data_dir / "logs",
+            preview_server_dir=(
+                Path(preview_server_dir_raw).expanduser().resolve()
+                if preview_server_dir_raw
+                else None
+            ),
+            preview_slides_dir=(
+                Path(preview_slides_dir_raw).expanduser().resolve()
+                if preview_slides_dir_raw
+                else None
+            ),
+            preview_theme_file_override=(
+                Path(preview_theme_file_raw).expanduser().resolve()
+                if preview_theme_file_raw
+                else None
+            ),
             sql_echo=sql_echo_raw in {"1", "true", "yes", "on"},
         )
 
@@ -66,6 +87,27 @@ class Settings(BaseModel):
 
     def project_dir(self, project_id: str) -> Path:
         return self.projects_dir / project_id
+
+    @property
+    def preview_theme_file_path(self) -> Path:
+        if self.preview_theme_file_override is not None:
+            return self.preview_theme_file_override
+
+        return self.preview_slides_dir_path.parent / "theme" / "variables.css"
+
+    @property
+    def preview_server_dir_path(self) -> Path:
+        if self.preview_server_dir is not None:
+            return self.preview_server_dir
+
+        return self.backend_dir.parent / "ppt-preview-server"
+
+    @property
+    def preview_slides_dir_path(self) -> Path:
+        if self.preview_slides_dir is not None:
+            return self.preview_slides_dir
+
+        return self.preview_server_dir_path / "src" / "slides"
 
     @property
     def database_url(self) -> str:

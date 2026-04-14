@@ -8,9 +8,10 @@ from pydantic import Field
 from app.schemas.base import APIModel
 from app.schemas.project import OutlineSchema
 from app.schemas.settings import SettingsResponse
+from app.schemas.theme import ThemeConfig
 
 AgentRoute = Literal["analyze", "plan", "chat"]
-ProjectPhase = Literal["chatting", "analyzing", "planning"]
+ProjectPhase = Literal["chatting", "analyzing", "planning", "generating"]
 SSECallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
@@ -55,6 +56,11 @@ class ProjectState(TypedDict):
     existing_outline: dict[str, Any] | None
     post_analyze_route: AgentRoute | None
     draft_outline: dict[str, Any] | None
+    pages: dict[int, dict[str, Any]]
+    global_theme: dict[str, Any] | None
+    generated_page: dict[str, Any] | None
+    generation_target_page: dict[str, Any] | None
+    draft_page_code: str | None
     persistable_assistant_message: dict[str, Any] | None
 
 
@@ -96,6 +102,11 @@ def create_initial_state(
         existing_outline=existing_outline,
         post_analyze_route=None,
         draft_outline=None,
+        pages={},
+        global_theme=_dump_theme(project.theme_config),
+        generated_page=None,
+        generation_target_page=None,
+        draft_page_code=None,
         persistable_assistant_message=None,
     )
 
@@ -109,5 +120,18 @@ def _dump_outline(outline: OutlineSchema | dict[str, Any] | None) -> dict[str, A
 
     if isinstance(outline, dict):
         return outline
+
+    return None
+
+
+def _dump_theme(theme: ThemeConfig | dict[str, Any] | None) -> dict[str, Any] | None:
+    if theme is None:
+        return None
+
+    if isinstance(theme, ThemeConfig):
+        return theme.model_dump(mode="json")
+
+    if isinstance(theme, dict):
+        return theme
 
     return None

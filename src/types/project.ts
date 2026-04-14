@@ -1,3 +1,5 @@
+import type { ThemeConfig } from './theme'
+
 export const PROJECT_STATUS_VALUES = [
   'draft',
   'planning',
@@ -48,7 +50,7 @@ export interface Project {
   id: string
   name: string
   status: ProjectStatus
-  theme_config: Record<string, unknown> | null
+  theme_config: ThemeConfig | null
   total_pages: number
   updated_at: string
 }

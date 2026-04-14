@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
-
 from pydantic import Field, field_validator
 
 from app.schemas.base import APIModel, ORMModel
 from app.schemas.enums import PageStatus, ProjectStatus
+from app.schemas.theme import ThemeConfig
 
 
 class OutlinePageSchema(APIModel):
@@ -75,7 +74,7 @@ class ProjectResponse(ORMModel):
     name: str
     description: str | None = None
     status: ProjectStatus
-    theme_config: dict[str, Any] | None = None
+    theme_config: ThemeConfig | None = None
     total_pages: int
     created_at: datetime
     updated_at: datetime

@@ -22,6 +22,20 @@ from app.schemas.project import (
     ProjectUpdate,
 )
 from app.schemas.settings import AppTheme, LLMProvider, SettingsResponse, SettingsUpdate
+from app.schemas.theme import (
+    DEFAULT_THEME_ID,
+    THEME_PRESET_IDS,
+    ThemeAnimationStyle,
+    ThemeAppearance,
+    ThemeBorderRadius,
+    ThemeColors,
+    ThemeConfig,
+    ThemeFonts,
+    ThemeListResponse,
+    ThemeShadows,
+    ThemeSyncResponse,
+    resolve_theme_id,
+)
 
 __all__ = [
     "AgentChatRequest",
@@ -51,6 +65,18 @@ __all__ = [
     "LLMProvider",
     "SettingsResponse",
     "SettingsUpdate",
+    "DEFAULT_THEME_ID",
+    "THEME_PRESET_IDS",
+    "ThemeAnimationStyle",
+    "ThemeAppearance",
+    "ThemeBorderRadius",
+    "ThemeColors",
+    "ThemeConfig",
+    "ThemeFonts",
+    "ThemeListResponse",
+    "ThemeShadows",
+    "ThemeSyncResponse",
+    "resolve_theme_id",
     "UploadedFileDeleteResponse",
     "UploadedFileListResponse",
     "UploadedFileResponse",

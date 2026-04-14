@@ -6,11 +6,13 @@ import ChatPanel from '@/components/chat/ChatPanel.vue'
 import GlassPanel from '@/components/common/GlassPanel.vue'
 import ModeSwitchPill from '@/components/common/ModeSwitchPill.vue'
 import OutlinePanel from '@/components/outline/OutlinePanel.vue'
+import ThemePresetPicker from '@/components/preview/ThemePresetPicker.vue'
 import { useWorkspaceAgentSession } from '@/composables/useWorkspaceAgentSession'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import type { WorkspaceMode } from '@/stores/workspaceStore'
 import { UPLOAD_FILE_ACCEPT_ATTRIBUTE, type UploadedFile } from '@/types/file'
 import type { Outline } from '@/types/project'
+import type { ThemeConfig } from '@/types/theme'
 import { PROJECT_STATUS_META, formatProjectUpdatedAt } from '@/utils/project'
 
 const props = defineProps<{
@@ -71,6 +73,9 @@ const uploadedFileCount = computed<number>(() => workspaceStore.uploadedFiles.le
 const deletingFileIds = computed<string[]>(() =>
   workspaceStore.uploadedFiles.filter((file) => workspaceStore.isDeletingFile(file.id)).map((file) => file.id)
 )
+const previewThemeError = computed<string | null>(() => {
+  return workspaceStore.previewThemeSyncError || workspaceStore.themePresetsError
+})
 const previewPageNumbers = computed<number[]>(() => {
   const totalPages = workspaceStore.project?.total_pages ?? 0
   const loadedPages = workspaceStore.project?.pages.length ?? 0
@@ -173,12 +178,28 @@ function handleOutlineFocus(pageNumber: number): void {
   session.setActiveOutlinePage(pageNumber)
 }
 
-function resolveUiError(error: unknown): string {
+async function handleThemeApply(theme: ThemeConfig): Promise<void> {
+  try {
+    await workspaceStore.applyTheme(theme)
+    message.success(`已应用 ${theme.label}`)
+  } catch (error: unknown) {
+    message.error(resolveUiError(error, '主题切换失败，请确认 Python 后端与 preview server 已正常运行。'))
+  }
+}
+
+function handleThemeRetry(): void {
+  void Promise.all([
+    workspaceStore.loadThemePresets({ force: true }),
+    workspaceStore.syncPreviewTheme({ force: true })
+  ]).catch(() => undefined)
+}
+
+function resolveUiError(error: unknown, fallback = '文件操作失败，请确认 Python 后端已经启动。'): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message.trim()
   }
 
-  return '文件操作失败，请确认 Python 后端已经启动。'
+  return fallback
 }
 </script>
 
@@ -336,6 +357,17 @@ function resolveUiError(error: unknown): string {
       </section>
 
       <GlassPanel variant="strong" class="flex flex-col gap-5 p-5">
+        <ThemePresetPicker
+          :active-theme-id="workspaceStore.activePreviewThemeId"
+          :applying-theme-id="workspaceStore.themeApplyingId"
+          :error="previewThemeError"
+          :loading="workspaceStore.themePresetsLoading"
+          :syncing="workspaceStore.previewThemeSyncing"
+          :themes="workspaceStore.themePresets"
+          @apply="handleThemeApply"
+          @retry="handleThemeRetry"
+        />
+
         <div>
           <p class="mono-meta mb-2 text-[color:var(--app-text-tertiary)]">单页优化区</p>
           <h2 class="m-0 text-xl font-semibold">当前页操作</h2>

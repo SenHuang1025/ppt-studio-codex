@@ -13,6 +13,8 @@ import type {
   ErrorEventPayload,
   FileParsedEventPayload,
   OutlineEventPayload,
+  PageCompleteEventPayload,
+  PageGeneratingEventPayload,
   ThinkingEventPayload
 } from '@/types/chat'
 
@@ -27,6 +29,8 @@ export class AgentSSEClient {
   private readonly deliberationStartedHandlers = new Set<EventHandler<DeliberationStartedEventPayload>>()
   private readonly deliberationRoundHandlers = new Set<EventHandler<DeliberationRoundEventPayload>>()
   private readonly deliberationSummaryHandlers = new Set<EventHandler<DeliberationSummaryEventPayload>>()
+  private readonly pageGeneratingHandlers = new Set<EventHandler<PageGeneratingEventPayload>>()
+  private readonly pageCompleteHandlers = new Set<EventHandler<PageCompleteEventPayload>>()
   private readonly assistantMessageHandlers = new Set<EventHandler<AssistantMessageEventPayload>>()
   private readonly errorHandlers = new Set<EventHandler<ErrorEventPayload>>()
   private readonly doneHandlers = new Set<EventHandler<Record<string, never>>>()
@@ -95,6 +99,14 @@ export class AgentSSEClient {
 
   public onDeliberationSummary(callback: EventHandler<DeliberationSummaryEventPayload>): () => void {
     return this.registerHandler(this.deliberationSummaryHandlers, callback)
+  }
+
+  public onPageGenerating(callback: EventHandler<PageGeneratingEventPayload>): () => void {
+    return this.registerHandler(this.pageGeneratingHandlers, callback)
+  }
+
+  public onPageComplete(callback: EventHandler<PageCompleteEventPayload>): () => void {
+    return this.registerHandler(this.pageCompleteHandlers, callback)
   }
 
   public onAssistantMessage(callback: EventHandler<AssistantMessageEventPayload>): () => void {
@@ -282,6 +294,12 @@ export class AgentSSEClient {
       case 'deliberation_summary':
         this.emitHandlers(this.deliberationSummaryHandlers, event.data)
         return
+      case 'page_generating':
+        this.emitHandlers(this.pageGeneratingHandlers, event.data)
+        return
+      case 'page_complete':
+        this.emitHandlers(this.pageCompleteHandlers, event.data)
+        return
       case 'assistant_message':
         this.emitHandlers(this.assistantMessageHandlers, event.data)
         return
@@ -418,6 +436,8 @@ function isKnownAgentSSEEventName(value: string): value is AgentSSEEventName {
     || value === 'deliberation_started'
     || value === 'deliberation_round'
     || value === 'deliberation_summary'
+    || value === 'page_generating'
+    || value === 'page_complete'
     || value === 'assistant_message'
     || value === 'error'
     || value === 'done'
