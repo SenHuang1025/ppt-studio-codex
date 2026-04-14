@@ -258,10 +258,14 @@ def test_agent_chat_persists_outline_to_project(
         project_response = client.get(f"/api/projects/{project_id}")
 
     events = parse_sse_events(payload)
+    event_names = [event["event"] for event in events]
     project_payload = project_response.json()
 
     assert response.status_code == 200
-    assert any(event["event"] == "outline" for event in events)
+    assert "deliberation_started" not in event_names
+    assert "deliberation_round" not in event_names
+    assert "deliberation_summary" not in event_names
+    assert "outline" in event_names
     assert project_response.status_code == 200
     assert project_payload["status"] == "planning"
     assert project_payload["total_pages"] == 3

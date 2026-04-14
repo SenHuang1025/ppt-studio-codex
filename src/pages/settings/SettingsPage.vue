@@ -21,7 +21,7 @@ interface SettingsSection {
 const message = useMessage()
 const sections: SettingsSection[] = [
   {
-    description: 'Provider、模型名称、API Base URL 与 API Key 安全存储',
+    description: 'Provider、模型名称、API Base URL、API Key 安全存储与 Planner 思辨增强开关',
     key: 'llm',
     label: '模型设置',
     short: '模'
@@ -62,7 +62,8 @@ const form = reactive<SettingsFormState>({
   apiKey: '',
   defaultTheme: 'warm-paper',
   llmProvider: 'openai',
-  modelName: 'gpt-5.2'
+  modelName: 'gpt-5.2',
+  multiAgentDeliberationEnabled: false
 })
 
 const activeSectionMeta = computed<SettingsSection>(() => {
@@ -107,7 +108,8 @@ async function handleSave(): Promise<void> {
       api_base_url: form.apiBaseUrl.trim(),
       default_theme: form.defaultTheme,
       llm_provider: form.llmProvider,
-      model_name: form.modelName.trim()
+      model_name: form.modelName.trim(),
+      multi_agent_deliberation_enabled: form.multiAgentDeliberationEnabled
     })
 
     try {
@@ -133,6 +135,7 @@ function applyLoadedSettings(settings: SettingsResponse, apiKey: string | null):
   form.modelName = settings.model_name
   form.apiBaseUrl = settings.api_base_url
   form.defaultTheme = settings.default_theme
+  form.multiAgentDeliberationEnabled = settings.multi_agent_deliberation_enabled
   form.apiKey = apiKey ?? ''
 
   storagePath.value = settings.storage_path
@@ -223,12 +226,14 @@ function updateTheme(value: AppTheme): void {
               :has-stored-api-key="hasStoredApiKey"
               :model-name="form.modelName"
               :model-suggestions="modelSuggestions"
+              :multi-agent-deliberation-enabled="form.multiAgentDeliberationEnabled"
               :provider="form.llmProvider"
               :provider-options="providerOptions"
               @clear-api-key="clearApiKeyInput"
               @update:api-base-url="(value) => (form.apiBaseUrl = value)"
               @update:api-key="(value) => (form.apiKey = value)"
               @update:model-name="(value) => (form.modelName = value)"
+              @update:multi-agent-deliberation-enabled="(value) => (form.multiAgentDeliberationEnabled = value)"
               @update:provider="updateProvider"
             />
 

@@ -29,4 +29,5 @@ export interface SettingsFormState {
   defaultTheme: AppTheme
   llmProvider: LLMProvider
   modelName: string
+  multiAgentDeliberationEnabled: boolean
 }

@@ -6,6 +6,16 @@ import ThinkingBubble from '@/components/chat/ThinkingBubble.vue'
 import type { ChatTimelineFileAttachment, ChatTimelineItem } from '@/types/chat'
 import { FILE_PARSE_STATUS_META, formatFileSize, formatUploadedFileType } from '@/utils/file'
 
+type DeliberationItem = Extract<ChatTimelineItem, { type: 'deliberation_message' }>
+
+interface DeliberationDisplayEntry {
+  content: string
+  id: string
+  label: string
+  role: string
+  showRawRole: boolean
+}
+
 const props = defineProps<{
   item: ChatTimelineItem
 }>()
@@ -31,6 +41,26 @@ const assistantHtml = computed<string>(() => markdown.render(displayedAssistantC
 const assistantLeadLabel = computed<string>(() => (props.item.type === 'assistant_message' ? 'Agent 回复' : ''))
 const outlinePreviewPages = computed(() =>
   props.item.type === 'outline_message' ? props.item.outline?.pages.slice(0, 4) ?? [] : []
+)
+const deliberationHeadline = computed<string>(() =>
+  props.item.type === 'deliberation_message' ? resolveDeliberationHeadline(props.item) : ''
+)
+const deliberationTargetBadge = computed<string>(() =>
+  props.item.type === 'deliberation_message' ? resolveDeliberationTargetBadge(props.item) : ''
+)
+const deliberationSummaryText = computed<string>(() =>
+  props.item.type === 'deliberation_message' ? resolveDeliberationSummary(props.item) : ''
+)
+const deliberationSummaryClass = computed<string>(() =>
+  props.item.type === 'deliberation_message'
+    ? resolveDeliberationSummaryClass(props.item)
+    : 'border-[rgba(104,166,125,0.14)] bg-[rgba(252,248,239,0.88)]'
+)
+const deliberationRoleEntries = computed<DeliberationDisplayEntry[]>(() =>
+  props.item.type === 'deliberation_message' ? props.item.entries.map(mapDeliberationEntry) : []
+)
+const isDeliberationFallback = computed<boolean>(() =>
+  props.item.type === 'deliberation_message' ? detectDeliberationFallback(props.item.summary) : false
 )
 
 watch(
@@ -149,6 +179,83 @@ function resolveStatusClass(item: Extract<ChatTimelineItem, { type: 'status_mess
     default:
       return 'border-[rgba(104,166,125,0.14)] bg-[rgba(255,249,239,0.72)] text-[color:var(--app-text-secondary)]'
   }
+}
+
+function resolveDeliberationHeadline(item: DeliberationItem): string {
+  if (item.target === 'planner') {
+    return '大纲思辨中'
+  }
+
+  const normalizedTarget = item.target.trim()
+  if (!normalizedTarget) {
+    return '思辨中'
+  }
+
+  return `${normalizedTarget} 思辨中`
+}
+
+function resolveDeliberationSummary(item: DeliberationItem): string {
+  const summary = item.summary?.trim()
+  if (summary) {
+    return summary
+  }
+
+  if (item.target === 'planner') {
+    return '正在从草案、评审、综合三个阶段收敛最终大纲。'
+  }
+
+  return '正在从草案、评审、综合三个阶段收敛当前结果。'
+}
+
+function resolveDeliberationTargetBadge(item: DeliberationItem): string {
+  if (item.target === 'planner') {
+    return 'Planner'
+  }
+
+  return item.target.trim() || 'Agent'
+}
+
+function resolveDeliberationSummaryClass(item: DeliberationItem): string {
+  if (detectDeliberationFallback(item.summary)) {
+    return 'border-[rgba(241,143,1,0.22)] bg-[rgba(255,244,230,0.92)]'
+  }
+
+  return 'border-[rgba(104,166,125,0.14)] bg-[rgba(252,248,239,0.88)]'
+}
+
+function detectDeliberationFallback(summary: string | null): boolean {
+  if (!summary) {
+    return false
+  }
+
+  return /回退|fallback/i.test(summary)
+}
+
+function mapDeliberationEntry(entry: DeliberationItem['entries'][number]): DeliberationDisplayEntry {
+  return {
+    content: entry.content,
+    id: entry.id,
+    label: resolveDeliberationRoleLabel(entry.role),
+    role: entry.role,
+    showRawRole: !isKnownDeliberationRole(entry.role)
+  }
+}
+
+function resolveDeliberationRoleLabel(role: string): string {
+  switch (role) {
+    case 'draft':
+      return '草案'
+    case 'critic':
+      return '评审'
+    case 'synthesis':
+      return '综合'
+    default:
+      return role
+  }
+}
+
+function isKnownDeliberationRole(role: string): boolean {
+  return role === 'draft' || role === 'critic' || role === 'synthesis'
 }
 
 function formatMessageTime(value: string): string {
@@ -289,15 +396,29 @@ function formatMessageTime(value: string): string {
     <div class="rounded-[var(--radius-xl)] border border-[rgba(104,166,125,0.16)] bg-[rgba(255,249,239,0.84)] px-4 py-4 shadow-[var(--shadow-glass-1)]">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--app-text-tertiary)]">思辨过程</div>
+          <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--primary-300)]">规划增强过程</div>
           <div class="mt-2 flex flex-wrap items-center gap-2">
-            <span class="text-base font-semibold text-[color:var(--app-text-primary)]">{{ item.target }}</span>
-            <NTag v-if="item.rounds !== null" round :bordered="false" class="border border-[rgba(104,166,125,0.16)] bg-[rgba(104,166,125,0.12)] text-[color:var(--primary-300)]">
+            <span class="text-base font-semibold text-[color:var(--app-text-primary)]">{{ deliberationHeadline }}</span>
+            <NTag round :bordered="false" class="border border-[rgba(104,166,125,0.16)] bg-[rgba(104,166,125,0.12)] text-[color:var(--primary-300)]">
+              {{ deliberationTargetBadge }}
+            </NTag>
+            <NTag
+              v-if="item.rounds !== null"
+              round
+              :bordered="false"
+              class="border border-[rgba(241,143,1,0.18)] bg-[rgba(255,243,226,0.9)] text-[color:var(--accent-200)]"
+            >
               {{ item.rounds }} 轮
             </NTag>
           </div>
-          <div class="mt-2 text-sm leading-6 text-[color:var(--app-text-secondary)]">
-            {{ item.summary ?? '正在收敛 draft / critic / synthesis 结果。' }}
+          <div class="mt-3 rounded-[var(--radius-lg)] border px-3 py-3 text-sm leading-6 text-[color:var(--app-text-secondary)]" :class="deliberationSummaryClass">
+            <div
+              v-if="isDeliberationFallback"
+              class="mono-meta mb-1 text-[10px] uppercase tracking-[0.16em] text-[color:var(--accent-200)]"
+            >
+              已回退到 Draft
+            </div>
+            {{ deliberationSummaryText }}
           </div>
         </div>
 
@@ -308,11 +429,27 @@ function formatMessageTime(value: string): string {
 
       <div v-if="deliberationExpanded" class="mt-4 space-y-3">
         <div
-          v-for="entry in item.entries"
+          v-if="deliberationRoleEntries.length === 0"
+          class="rounded-[var(--radius-lg)] border border-[color:var(--app-border-subtle)] bg-[rgba(255,248,237,0.82)] px-3 py-3 text-sm leading-6 text-[color:var(--app-text-secondary)]"
+        >
+          正在等待草案、评审或综合阶段的详细结果。
+        </div>
+        <div
+          v-for="entry in deliberationRoleEntries"
           :key="entry.id"
           class="rounded-[var(--radius-lg)] border border-[color:var(--app-border-subtle)] bg-[rgba(255,248,237,0.82)] px-3 py-3"
         >
-          <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--app-text-tertiary)]">{{ entry.role }}</div>
+          <div class="flex items-center justify-between gap-3">
+            <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--app-text-tertiary)]">
+              {{ entry.label }}
+            </div>
+            <span
+              v-if="entry.showRawRole"
+              class="rounded-full border border-[color:var(--app-border-subtle)] bg-[rgba(255,252,247,0.94)] px-2 py-0.5 text-[10px] text-[color:var(--app-text-tertiary)]"
+            >
+              {{ entry.role }}
+            </span>
+          </div>
           <div class="mt-2 whitespace-pre-wrap text-sm leading-6 text-[color:var(--app-text-secondary)]">
             {{ entry.content }}
           </div>

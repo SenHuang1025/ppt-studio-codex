@@ -241,6 +241,19 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
 
   function handleDeliberationStarted(payload: DeliberationStartedEventPayload): void {
     agentConnectionState.value = 'streaming'
+    if (currentDeliberationItemId.value) {
+      updateSessionItem(currentDeliberationItemId.value, (item) =>
+        item.type === 'deliberation_message'
+          ? {
+              ...item,
+              rounds: payload.rounds,
+              target: payload.target
+            }
+          : item
+      )
+      return
+    }
+
     const item = createDeliberationTimelineItem(payload.target, payload.rounds)
     currentDeliberationItemId.value = appendSessionItem(item)
   }
@@ -438,6 +451,14 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
 
   function ensureDeliberationTimelineItem(target: string): void {
     if (currentDeliberationItemId.value) {
+      updateSessionItem(currentDeliberationItemId.value, (item) =>
+        item.type === 'deliberation_message'
+          ? {
+              ...item,
+              target
+            }
+          : item
+      )
       return
     }
 
