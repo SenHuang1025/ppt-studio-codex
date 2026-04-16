@@ -33,6 +33,7 @@ async def list_chat_messages(
     project_id: str,
     page_number: int | None = Query(default=None, ge=1),
     include_global: bool = Query(default=False),
+    include_page_messages: bool = Query(default=False),
     limit: int | None = Query(default=None, ge=1, le=200),
     chat_service: ChatService = Depends(get_chat_service),
 ) -> ChatMessageListResponse:
@@ -40,6 +41,7 @@ async def list_chat_messages(
         messages, total = await chat_service.list_messages(
             project_id,
             page_number=page_number,
+            include_page_messages=include_page_messages,
             limit=limit,
             include_global_for_page=include_global,
         )

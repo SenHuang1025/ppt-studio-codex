@@ -62,6 +62,7 @@ export function usePreviewWorkspace(options: UsePreviewWorkspaceOptions) {
       const realtimeState = options.pageGenerationStates.value[pageNumber]
 
       return {
+        chatMessageCount: generatedPage?.chat_message_count ?? 0,
         contentBrief: normalizePreviewText(outlinePage?.content_brief),
         generatedPage,
         hasGeneratedCode: Boolean(generatedPage?.vue_code?.trim()),

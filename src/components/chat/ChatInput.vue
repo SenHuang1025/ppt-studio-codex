@@ -6,13 +6,21 @@ const props = withDefaults(
   defineProps<{
     accept?: string
     disabled?: boolean
+    helperText?: string
     modelValue: string
+    placeholder?: string
+    showFileUpload?: boolean
+    submitLabel?: string
     submitting?: boolean
     uploading?: boolean
   }>(),
   {
     accept: '',
     disabled: false,
+    helperText: '支持 xlsx / csv / docx / pdf / pptx / png / jpg / jpeg / md / json / txt，单文件 50MB。',
+    placeholder: '描述你的演示目标、受众和想突出的重点；也可以结合已上传资料继续调整大纲。',
+    showFileUpload: true,
+    submitLabel: '发送消息',
     submitting: false,
     uploading: false
   }
@@ -85,6 +93,7 @@ defineExpose({
 <template>
   <div class="space-y-3">
     <input
+      v-if="showFileUpload"
       ref="fileInputRef"
       :accept="accept"
       class="hidden"
@@ -98,7 +107,7 @@ defineExpose({
       :autosize="{ minRows: 3, maxRows: 6 }"
       :disabled="disabled || submitting"
       :value="modelValue"
-      placeholder="描述你的演示目标、受众和想突出的重点；也可以结合已上传资料继续调整大纲。"
+      :placeholder="placeholder"
       type="textarea"
       @keydown="handleKeydown"
       @update:value="(value) => emit('update:modelValue', value)"
@@ -106,14 +115,23 @@ defineExpose({
 
     <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
       <div class="text-xs leading-6 text-[color:var(--app-text-tertiary)]">
-        支持 xlsx / csv / docx / pdf / pptx / png / jpg / jpeg / md / json / txt，单文件 50MB。
+        {{ helperText }}
       </div>
 
       <div class="flex flex-wrap justify-end gap-2">
-        <NButton secondary strong :disabled="disabled || submitting || uploading" :loading="uploading" @click="openFilePicker">
+        <NButton
+          v-if="showFileUpload"
+          secondary
+          strong
+          :disabled="disabled || submitting || uploading"
+          :loading="uploading"
+          @click="openFilePicker"
+        >
           📎 上传文件
         </NButton>
-        <NButton tertiary strong :disabled="!canSubmit" :loading="submitting" @click="handleSubmit">发送消息</NButton>
+        <NButton tertiary strong :disabled="!canSubmit" :loading="submitting" @click="handleSubmit">
+          {{ submitLabel }}
+        </NButton>
       </div>
     </div>
   </div>

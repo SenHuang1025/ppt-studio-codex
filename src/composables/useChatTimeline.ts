@@ -100,6 +100,7 @@ function mapPersistedChatMessage(message: ChatMessage, index: number): ChatTimel
       ...baseItem,
       content: message.content,
       dedupeKey: buildSimpleDedupeKey(message.role, message.message_type, message.content, message.page_number),
+      pageNumber: message.page_number,
       type: 'user_message'
     }
     return item
@@ -110,6 +111,7 @@ function mapPersistedChatMessage(message: ChatMessage, index: number): ChatTimel
     content: message.content,
     contentFormat: message.message_type === 'code' ? 'plain' : 'markdown',
     dedupeKey: buildSimpleDedupeKey(message.role, message.message_type, message.content, message.page_number),
+    pageNumber: message.page_number,
     type: 'assistant_message'
   }
   return item

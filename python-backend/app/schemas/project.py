@@ -89,8 +89,33 @@ class PageResponse(ORMModel):
     vue_code: str | None = None
     status: PageStatus
     version: int
+    chat_message_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+class PageRollbackRequest(APIModel):
+    version: int = Field(ge=1)
+
+
+class PageInsertAfterRequest(APIModel):
+    description: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Page description cannot be blank.")
+        return normalized
+
+
+class PageReorderRequest(APIModel):
+    page_numbers: list[int] = Field(min_length=1)
+
+
+class PageMutationResponse(APIModel):
+    success: bool = True
 
 
 class PageVersionResponse(ORMModel):

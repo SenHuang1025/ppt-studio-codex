@@ -3,6 +3,7 @@ import type { PageStatus, ProjectPage, ProjectStatus } from '@/types/project'
 import type {
   PageGenerationStage,
   PreviewPageStatus,
+  PreviewVersionSelection,
   RealtimePageGenerationState
 } from '@/types/preview'
 
@@ -31,6 +32,8 @@ export function parsePreviewPageQuery(
 
 export function getPreviewPageStatusLabel(status: PreviewPageStatus): string {
   switch (status) {
+    case 'confirmed':
+      return '已确认'
     case 'generated':
       return '已生成'
     case 'generating':
@@ -112,6 +115,10 @@ export function resolvePreviewPageStatus(options: {
     return options.realtimeState.status
   }
 
+  if (options.generatedPage?.status === 'confirmed') {
+    return 'confirmed'
+  }
+
   if (options.generatedPage && isGeneratedProjectPageStatus(options.generatedPage.status)) {
     return 'generated'
   }
@@ -147,4 +154,12 @@ export function isGeneratedProjectPageStatus(status: PageStatus): boolean {
 export function normalizePreviewText(value: string | null | undefined): string | null {
   const normalizedValue = value?.trim()
   return normalizedValue ? normalizedValue : null
+}
+
+export function formatPreviewVersionHistoryLabel(selection: PreviewVersionSelection | null | undefined): string | null {
+  if (!selection) {
+    return null
+  }
+
+  return `历史预览 · v${selection.sourceVersion}`
 }

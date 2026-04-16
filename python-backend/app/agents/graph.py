@@ -7,6 +7,7 @@ from typing import Any
 from app.agents.file_analyzer import file_analyzer_node
 from app.agents.llm import LLMRuntime
 from app.agents.orchestrator import direct_reply_node, orchestrator_node
+from app.agents.page_optimizer import page_optimizer_node
 from app.agents.planner import deliberate_plan_node, planner_node
 from app.agents.state import ProjectState, create_initial_state
 
@@ -15,7 +16,9 @@ from app.agents.state import ProjectState, create_initial_state
 class AgentGraphContext:
     chat_service: Any
     file_service: Any
+    page_service: Any
     project_service: Any
+    theme_service: Any
     llm_runtime: LLMRuntime
 
 
@@ -39,6 +42,10 @@ def build_agent_graph(context: AgentGraphContext) -> Any:
         "deliberate_plan",
         partial(deliberate_plan_node, model=context.llm_runtime.chat_model, project_service=context.project_service),
     )
+    workflow.add_node(
+        "optimize_page",
+        partial(page_optimizer_node, model=context.llm_runtime.chat_model, page_service=context.page_service),
+    )
     workflow.add_node("direct_reply", partial(direct_reply_node, model=context.llm_runtime.chat_model))
     workflow.set_entry_point("orchestrate")
 
@@ -48,6 +55,7 @@ def build_agent_graph(context: AgentGraphContext) -> Any:
         {
             "analyze": "analyze_files",
             "plan": "plan_outline",
+            "optimize": "optimize_page",
             "chat": "direct_reply",
         },
     )
@@ -68,6 +76,7 @@ def build_agent_graph(context: AgentGraphContext) -> Any:
         },
     )
     workflow.add_edge("deliberate_plan", END)
+    workflow.add_edge("optimize_page", END)
     workflow.add_edge("direct_reply", END)
 
     return workflow.compile()
@@ -86,7 +95,9 @@ async def run_agent_workflow(
     chat_history = await context.chat_service.build_agent_history(
         project_id,
         page_number=page_number,
+        limit=20 if page_number is not None else context.chat_service.DEFAULT_AGENT_HISTORY_LIMIT,
         exclude_message_id=exclude_history_message_id,
+        include_global_for_page=False,
     )
     uploaded_files = await context.file_service.list_files(project_id)
     initial_state = create_initial_state(
@@ -99,6 +110,7 @@ async def run_agent_workflow(
         settings=context.llm_runtime.settings,
         sse_callback=sse_callback,
     )
+    initial_state["global_theme"] = context.theme_service.resolve_theme(project.theme_config).model_dump(mode="json")
     graph = build_agent_graph(context)
     return await graph.ainvoke(initial_state)
 
@@ -155,6 +167,13 @@ def _build_fallback_graph(context: AgentGraphContext, _exc: Exception) -> Any:
                         project_service=context.project_service,
                     )
                 return current_state
+
+            if route == "optimize":
+                return await page_optimizer_node(
+                    current_state,
+                    model=context.llm_runtime.chat_model,
+                    page_service=context.page_service,
+                )
 
             return await direct_reply_node(current_state, model=context.llm_runtime.chat_model)
 

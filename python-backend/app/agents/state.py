@@ -10,8 +10,8 @@ from app.schemas.project import OutlineSchema
 from app.schemas.settings import SettingsResponse
 from app.schemas.theme import ThemeConfig
 
-AgentRoute = Literal["analyze", "plan", "chat"]
-ProjectPhase = Literal["chatting", "analyzing", "planning", "generating"]
+AgentRoute = Literal["analyze", "plan", "optimize", "chat"]
+ProjectPhase = Literal["chatting", "analyzing", "planning", "generating", "optimizing"]
 SSECallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
@@ -61,6 +61,8 @@ class ProjectState(TypedDict):
     generated_page: dict[str, Any] | None
     generation_target_page: dict[str, Any] | None
     draft_page_code: str | None
+    optimized_page: dict[str, Any] | None
+    draft_optimized_page_code: str | None
     persistable_assistant_message: dict[str, Any] | None
 
 
@@ -107,6 +109,8 @@ def create_initial_state(
         generated_page=None,
         generation_target_page=None,
         draft_page_code=None,
+        optimized_page=None,
+        draft_optimized_page_code=None,
         persistable_assistant_message=None,
     )
 

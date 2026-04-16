@@ -49,6 +49,13 @@ OPTIMIZE_PAGE_KEYWORDS = (
     "改第",
     "当前页",
     "这一页",
+    "这页",
+    "本页",
+    "标题",
+    "背景色",
+    "好看一点",
+    "大气一些",
+    "更专业",
 )
 GREETING_KEYWORDS = (
     "你好",
@@ -66,6 +73,12 @@ async def determine_route(state: ProjectState, *, model: Any | None = None) -> R
     has_outline = bool(state.get("existing_outline"))
     has_pending_files = _has_pending_files(state.get("uploaded_files", []))
 
+    if state.get("page_number") is not None and _has_existing_page(state, page_number=int(state["page_number"])):
+        return RouteDecision(
+            route="optimize",
+            reason="请求携带 page_number 且页面已存在，进入单页优化。",
+        )
+
     if has_pending_files:
         return RouteDecision(
             route="analyze",
@@ -81,9 +94,14 @@ async def determine_route(state: ProjectState, *, model: Any | None = None) -> R
         )
 
     if _requests_unsupported_optimization(user_message):
+        if _has_any_existing_page(state):
+            return RouteDecision(
+                route="chat",
+                reason="用户请求页面优化，但没有提供明确 page_number。",
+            )
         return RouteDecision(
             route="chat",
-            reason="当前阶段暂不支持页面优化能力，转为边界说明。",
+            reason="当前项目还没有可优化页面。",
             unsupported_capability="optimize",
         )
 
@@ -131,7 +149,7 @@ async def orchestrator_node(state: ProjectState, *, model: Any | None = None) ->
     state["current_phase"] = (
         "analyzing"
         if decision.route == "analyze"
-        else "planning" if decision.route == "plan" else "chatting"
+        else "planning" if decision.route == "plan" else "optimizing" if decision.route == "optimize" else "chatting"
     )
     return state
 
@@ -163,10 +181,10 @@ async def build_direct_reply(state: ProjectState, *, model: Any | None = None) -
     user_message = state["user_message"].strip()
 
     if _requests_unsupported_generation(user_message):
-        return "当前 Phase 2.4 还不支持直接生成页面。先让我分析资料并规划大纲，页面生成会在后续阶段接入。"
+        return "可以生成页面，但请先确认大纲，或使用单页生成入口指定要生成的页码。"
 
     if _requests_unsupported_optimization(user_message):
-        return "当前 Phase 2.4 还不支持单页优化。先确认资料和大纲，页面优化能力会在后续阶段开放。"
+        return "可以优化单页，请先切换到预览中的具体页面后再发送修改意见。"
 
     if model is None:
         return _build_fallback_direct_reply(state)
@@ -260,6 +278,19 @@ def _has_pending_files(files: list[Any]) -> bool:
             return True
 
     return False
+
+
+def _has_existing_page(state: ProjectState, *, page_number: int) -> bool:
+    project = state.get("project")
+    for page in getattr(project, "pages", None) or []:
+        if getattr(page, "page_number", None) == page_number and getattr(page, "vue_code", None):
+            return True
+    return False
+
+
+def _has_any_existing_page(state: ProjectState) -> bool:
+    project = state.get("project")
+    return any(bool(getattr(page, "vue_code", None)) for page in getattr(project, "pages", None) or [])
 
 
 def _read_attr(value: Any, name: str) -> Any:

@@ -1,16 +1,25 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NButton } from 'naive-ui'
 import {
   buildPreviewSlideUrl,
+  buildPreviewVersionUrl,
   ensurePreviewServerReachable,
   getPreviewBaseUrl
 } from '@/services/previewService'
-import type { PreviewPageStatus, SlideRendererErrorKind, SlideRendererState } from '@/types/preview'
+import type {
+  IframeScrollSnapshot,
+  PreviewPageStatus,
+  SlideRendererErrorKind,
+  SlideRendererState
+} from '@/types/preview'
 
 const SLIDE_WIDTH = 1920
 const SLIDE_HEIGHT = 1080
 const LOAD_TIMEOUT_MS = 6000
+const SCROLL_SNAPSHOT_TIMEOUT_MS = 180
+const PREVIEW_IFRAME_MESSAGE_SOURCE = 'ppt-studio-preview-frame'
+const PREVIEW_IFRAME_MESSAGE_TARGET = 'ppt-studio-host'
 
 const props = withDefaults(defineProps<{
   currentGenerationStageLabel?: string | null
@@ -19,19 +28,34 @@ const props = withDefaults(defineProps<{
   pageNumber: number
   pageStatus: PreviewPageStatus
   pageTitle: string
-  refreshKey?: number
+  previewOverrideCode?: string | null
+  refreshToken?: string
 }>(), {
   currentGenerationStageLabel: null,
   generationActive: false,
   generationActivePageNumber: null,
-  refreshKey: 0
+  previewOverrideCode: null,
+  refreshToken: '0'
 })
 
+interface RenderFrameSlot {
+  key: string
+  pageNumber: number
+  src: string
+}
+
+interface HostFrameMessageEnvelope {
+  id?: string
+  payload?: unknown
+  source?: string
+  type?: string
+}
+
 const containerRef = ref<HTMLElement | null>(null)
-const stableFrameSrc = ref<string>('')
-const loadingFrameSrc = ref<string>('')
-const stableFramePageNumber = ref<number | null>(null)
-const loadingTargetPageNumber = ref<number | null>(null)
+const stableFrameRef = ref<HTMLIFrameElement | null>(null)
+const loadingFrameRef = ref<HTMLIFrameElement | null>(null)
+const stableFrame = ref<RenderFrameSlot | null>(null)
+const loadingFrame = ref<RenderFrameSlot | null>(null)
 const errorMessage = ref<string | null>(null)
 const errorKind = ref<SlideRendererErrorKind | null>(null)
 const rendererState = ref<SlideRendererState>('idle')
@@ -40,6 +64,9 @@ const containerHeight = ref(0)
 let resizeObserver: ResizeObserver | null = null
 let loadSequence = 0
 let loadTimeoutId: number | null = null
+let frameSequence = 0
+let scrollRequestSequence = 0
+const pendingScrollResolvers = new Map<string, (snapshot: IframeScrollSnapshot | null) => void>()
 
 const scale = computed<number>(() => {
   if (containerWidth.value <= 0 || containerHeight.value <= 0) {
@@ -62,13 +89,13 @@ const iframeStyle = computed<Record<string, string>>(() => ({
   transformOrigin: 'top left',
   width: `${SLIDE_WIDTH}px`
 }))
-const hasStableFrame = computed<boolean>(() => Boolean(stableFrameSrc.value))
+const hasStableFrame = computed<boolean>(() => stableFrame.value !== null)
 const shouldShowFrame = computed<boolean>(() =>
   rendererState.value !== 'idle'
-    && (Boolean(stableFrameSrc.value) || Boolean(loadingFrameSrc.value) || rendererState.value === 'error')
+    && (stableFrame.value !== null || loadingFrame.value !== null || rendererState.value === 'error')
 )
 const isShowingStaleFrame = computed<boolean>(() =>
-  stableFramePageNumber.value !== null && stableFramePageNumber.value !== props.pageNumber
+  stableFrame.value !== null && stableFrame.value.pageNumber !== props.pageNumber
 )
 
 const idleTitle = computed<string>(() => {
@@ -109,8 +136,8 @@ const errorTitle = computed<string>(() => {
 const errorDescription = computed<string>(() => {
   const baseMessage = errorMessage.value || '预览画布暂时不可用，请稍后重试。'
 
-  if (isShowingStaleFrame.value && stableFramePageNumber.value) {
-    return `${baseMessage} 当前仍保留第 ${stableFramePageNumber.value} 页的上一次成功画面。`
+  if (isShowingStaleFrame.value && stableFrame.value) {
+    return `${baseMessage} 当前仍保留第 ${stableFrame.value.pageNumber} 页的上一次成功画面。`
   }
 
   return baseMessage
@@ -120,9 +147,11 @@ const retryLabel = computed<string>(() =>
 )
 
 watch(
-  () => [props.pageNumber, props.pageStatus, props.refreshKey] as const,
+  () => [props.pageNumber, props.pageStatus, props.previewOverrideCode, props.refreshToken] as const,
   (currentValue, previousValue) => {
-    const forceRefresh = previousValue ? currentValue[2] !== previousValue[2] : false
+    const forceRefresh = previousValue
+      ? currentValue[2] !== previousValue[2] || currentValue[3] !== previousValue[3]
+      : false
     void loadCurrentSlide(forceRefresh)
   },
   { immediate: true }
@@ -133,6 +162,7 @@ onMounted(() => {
     return
   }
 
+  window.addEventListener('message', handleIframeMessage)
   updateContainerSize(containerRef.value)
   resizeObserver = new ResizeObserver((entries) => {
     const entry = entries[0]
@@ -146,24 +176,28 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('message', handleIframeMessage)
   resizeObserver?.disconnect()
   resizeObserver = null
   clearLoadTimeout()
+  resolvePendingScrollRequests()
 })
 
-function handleLoadingFrameLoad(): void {
-  if (rendererState.value !== 'loading' || !loadingFrameSrc.value) {
+async function handleLoadingFrameLoad(): Promise<void> {
+  if (rendererState.value !== 'loading' || !loadingFrame.value) {
     return
   }
 
   clearLoadTimeout()
-  stableFrameSrc.value = loadingFrameSrc.value
-  stableFramePageNumber.value = loadingTargetPageNumber.value
-  loadingFrameSrc.value = ''
-  loadingTargetPageNumber.value = null
+  const snapshot = await readStableFrameScrollSnapshot()
+  const nextStableFrame = loadingFrame.value
+  stableFrame.value = nextStableFrame
+  loadingFrame.value = null
   errorKind.value = null
   errorMessage.value = null
   rendererState.value = 'ready'
+  await nextTick()
+  await restoreFrameScrollSnapshot(stableFrameRef.value, snapshot)
 }
 
 function handleRetry(): void {
@@ -177,11 +211,9 @@ async function loadCurrentSlide(forceRefresh: boolean): Promise<void> {
   errorMessage.value = null
   errorKind.value = null
 
-  if (props.pageStatus !== 'generated') {
-    stableFrameSrc.value = ''
-    stableFramePageNumber.value = null
-    loadingFrameSrc.value = ''
-    loadingTargetPageNumber.value = null
+  if (props.pageStatus !== 'generated' && props.pageStatus !== 'confirmed') {
+    stableFrame.value = null
+    loadingFrame.value = null
     rendererState.value = 'idle'
     return
   }
@@ -191,21 +223,25 @@ async function loadCurrentSlide(forceRefresh: boolean): Promise<void> {
   try {
     const baseUrl = await getPreviewBaseUrl(forceRefresh)
     await ensurePreviewServerReachable(baseUrl)
-    const slideUrl = buildPreviewSlideUrl(baseUrl, props.pageNumber)
+    const slideUrl = props.previewOverrideCode
+      ? buildPreviewVersionUrl(baseUrl, props.pageNumber)
+      : buildPreviewSlideUrl(baseUrl, props.pageNumber)
 
     if (currentLoadId !== loadSequence) {
       return
     }
 
-    loadingTargetPageNumber.value = props.pageNumber
-    loadingFrameSrc.value = `${slideUrl}${slideUrl.includes('?') ? '&' : '?'}ts=${Date.now()}`
+    loadingFrame.value = {
+      key: `preview-frame-${++frameSequence}`,
+      pageNumber: props.pageNumber,
+      src: `${slideUrl}${slideUrl.includes('?') ? '&' : '?'}ts=${Date.now()}`
+    }
     loadTimeoutId = window.setTimeout(() => {
       if (currentLoadId !== loadSequence || rendererState.value !== 'loading') {
         return
       }
 
-      loadingFrameSrc.value = ''
-      loadingTargetPageNumber.value = null
+      loadingFrame.value = null
       errorKind.value = 'slide-load-failed'
       rendererState.value = 'error'
       errorMessage.value = '预览加载超时，请刷新当前页，或确认 preview server 仍在运行。'
@@ -215,8 +251,7 @@ async function loadCurrentSlide(forceRefresh: boolean): Promise<void> {
       return
     }
 
-    loadingFrameSrc.value = ''
-    loadingTargetPageNumber.value = null
+    loadingFrame.value = null
     errorKind.value = 'server-unavailable'
     rendererState.value = 'error'
     errorMessage.value = resolvePreviewError(error, errorKind.value)
@@ -249,6 +284,108 @@ function resolvePreviewError(error: unknown, kind: SlideRendererErrorKind | null
 
   return '当前页预览暂时不可用，请稍后重试。'
 }
+
+function handleIframeMessage(event: MessageEvent<unknown>): void {
+  const data = event.data as HostFrameMessageEnvelope | null
+
+  if (!data || data.source !== PREVIEW_IFRAME_MESSAGE_SOURCE || typeof data.type !== 'string') {
+    return
+  }
+
+  if (data.type !== 'preview-scroll-snapshot' || typeof data.id !== 'string') {
+    return
+  }
+
+  const resolve = pendingScrollResolvers.get(data.id)
+  if (!resolve) {
+    return
+  }
+
+  pendingScrollResolvers.delete(data.id)
+  resolve(isIframeScrollSnapshot(data.payload) ? data.payload : null)
+}
+
+async function readStableFrameScrollSnapshot(): Promise<IframeScrollSnapshot | null> {
+  return requestFrameScrollSnapshot(stableFrameRef.value)
+}
+
+async function requestFrameScrollSnapshot(frame: HTMLIFrameElement | null): Promise<IframeScrollSnapshot | null> {
+  if (!frame?.contentWindow) {
+    return null
+  }
+
+  const requestId = `preview-scroll-${++scrollRequestSequence}`
+
+  return await new Promise<IframeScrollSnapshot | null>((resolve) => {
+    const timeoutId = window.setTimeout(() => {
+      pendingScrollResolvers.delete(requestId)
+      resolve(null)
+    }, SCROLL_SNAPSHOT_TIMEOUT_MS)
+
+    pendingScrollResolvers.set(requestId, (snapshot) => {
+      window.clearTimeout(timeoutId)
+      resolve(snapshot)
+    })
+
+    frame.contentWindow?.postMessage(
+      {
+        id: requestId,
+        source: PREVIEW_IFRAME_MESSAGE_TARGET,
+        type: 'request-preview-scroll-snapshot'
+      },
+      '*'
+    )
+  })
+}
+
+async function restoreFrameScrollSnapshot(
+  frame: HTMLIFrameElement | null,
+  snapshot: IframeScrollSnapshot | null
+): Promise<void> {
+  if (!frame?.contentWindow || !snapshot) {
+    return
+  }
+
+  await waitForAnimationFrame()
+  frame.contentWindow.postMessage(
+    {
+      payload: snapshot,
+      source: PREVIEW_IFRAME_MESSAGE_TARGET,
+      type: 'restore-preview-scroll-snapshot'
+    },
+    '*'
+  )
+}
+
+function waitForAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve())
+  })
+}
+
+function resolvePendingScrollRequests(): void {
+  for (const resolve of pendingScrollResolvers.values()) {
+    resolve(null)
+  }
+
+  pendingScrollResolvers.clear()
+}
+
+function isIframeScrollSnapshot(value: unknown): value is IframeScrollSnapshot {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const candidate = value as Record<string, unknown>
+  const windowSnapshot = candidate.window
+  const elements = candidate.elements
+
+  return Array.isArray(elements)
+    && typeof windowSnapshot === 'object'
+    && windowSnapshot !== null
+    && typeof (windowSnapshot as Record<string, unknown>).left === 'number'
+    && typeof (windowSnapshot as Record<string, unknown>).top === 'number'
+}
 </script>
 
 <template>
@@ -276,23 +413,25 @@ function resolvePreviewError(error: unknown, kind: SlideRendererErrorKind | null
           :style="frameBoxStyle"
         >
           <iframe
-            v-if="stableFrameSrc"
-            :key="stableFrameSrc"
-            :src="stableFrameSrc"
+            v-if="stableFrame"
+            ref="stableFrameRef"
+            :key="stableFrame.key"
+            :src="stableFrame.src"
             sandbox="allow-scripts allow-same-origin"
             title="PPT slide preview"
             :style="iframeStyle"
           />
           <iframe
-            v-if="loadingFrameSrc"
-            :key="loadingFrameSrc"
-            :src="loadingFrameSrc"
+            v-if="loadingFrame"
+            ref="loadingFrameRef"
+            :key="loadingFrame.key"
+            :src="loadingFrame.src"
             sandbox="allow-scripts allow-same-origin"
             title="PPT slide preview loading"
             class="absolute inset-0"
             :class="hasStableFrame ? 'pointer-events-none opacity-0' : ''"
             :style="iframeStyle"
-            @load="handleLoadingFrameLoad"
+            @load="void handleLoadingFrameLoad()"
           />
 
           <div

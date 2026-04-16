@@ -21,6 +21,13 @@ export function buildPreviewSlideUrl(baseUrl: string, pageNumber: number): strin
   return new URL(`slide/${normalizedPageNumber}`, ensureTrailingSlash(baseUrl)).toString()
 }
 
+export function buildPreviewVersionUrl(baseUrl: string, pageNumber: number): string {
+  const normalizedPageNumber = Number.isFinite(pageNumber) ? Math.max(1, Math.floor(pageNumber)) : 1
+  const targetUrl = new URL('version-preview', ensureTrailingSlash(baseUrl))
+  targetUrl.searchParams.set('page', String(normalizedPageNumber))
+  return targetUrl.toString()
+}
+
 export async function ensurePreviewServerReachable(baseUrl: string): Promise<void> {
   await fetch(ensureTrailingSlash(baseUrl), {
     cache: 'no-store',

@@ -15,6 +15,8 @@ import type {
   OutlineEventPayload,
   PageCompleteEventPayload,
   PageGeneratingEventPayload,
+  PageOptimizingEventPayload,
+  PageUpdatedEventPayload,
   ThinkingEventPayload
 } from '@/types/chat'
 
@@ -31,6 +33,8 @@ export class AgentSSEClient {
   private readonly deliberationSummaryHandlers = new Set<EventHandler<DeliberationSummaryEventPayload>>()
   private readonly pageGeneratingHandlers = new Set<EventHandler<PageGeneratingEventPayload>>()
   private readonly pageCompleteHandlers = new Set<EventHandler<PageCompleteEventPayload>>()
+  private readonly pageOptimizingHandlers = new Set<EventHandler<PageOptimizingEventPayload>>()
+  private readonly pageUpdatedHandlers = new Set<EventHandler<PageUpdatedEventPayload>>()
   private readonly assistantMessageHandlers = new Set<EventHandler<AssistantMessageEventPayload>>()
   private readonly errorHandlers = new Set<EventHandler<ErrorEventPayload>>()
   private readonly doneHandlers = new Set<EventHandler<Record<string, never>>>()
@@ -72,6 +76,27 @@ export class AgentSSEClient {
     })
   }
 
+  public async generatePage(projectId: string, pageNumber: number): Promise<void> {
+    const normalizedProjectId = projectId.trim()
+    const normalizedPageNumber = Number.isFinite(pageNumber) ? Math.max(1, Math.floor(pageNumber)) : null
+
+    if (!normalizedProjectId) {
+      throw new Error('Project id is required before generating a page.')
+    }
+
+    if (normalizedPageNumber === null) {
+      throw new Error('A valid page number is required before generating a page.')
+    }
+
+    this.disconnect()
+
+    await this.openStream({
+      includeApiKey: true,
+      payload: {},
+      url: await this.buildGeneratePageUrl(normalizedProjectId, normalizedPageNumber)
+    })
+  }
+
   public disconnect(): void {
     this.abortController?.abort()
     this.abortController = null
@@ -109,6 +134,14 @@ export class AgentSSEClient {
     return this.registerHandler(this.pageCompleteHandlers, callback)
   }
 
+  public onPageOptimizing(callback: EventHandler<PageOptimizingEventPayload>): () => void {
+    return this.registerHandler(this.pageOptimizingHandlers, callback)
+  }
+
+  public onPageUpdated(callback: EventHandler<PageUpdatedEventPayload>): () => void {
+    return this.registerHandler(this.pageUpdatedHandlers, callback)
+  }
+
   public onAssistantMessage(callback: EventHandler<AssistantMessageEventPayload>): () => void {
     return this.registerHandler(this.assistantMessageHandlers, callback)
   }
@@ -141,6 +174,14 @@ export class AgentSSEClient {
     ).toString()
   }
 
+  private async buildGeneratePageUrl(projectId: string, pageNumber: number): Promise<string> {
+    const baseUrl = await getApiBaseUrl()
+    return new URL(
+      `projects/${encodeURIComponent(projectId)}/pages/${pageNumber}/regenerate`,
+      ensureTrailingSlash(baseUrl)
+    ).toString()
+  }
+
   private buildRequestPayload(message: string, pageNumber?: number): AgentChatRequestPayload {
     if (pageNumber === undefined) {
       return { message }
@@ -162,7 +203,7 @@ export class AgentSSEClient {
 
   private async openStream(options: {
     includeApiKey: boolean
-    payload: AgentChatRequestPayload | AgentConfirmOutlineRequestPayload
+    payload: object
     url: string
   }): Promise<void> {
     const controller = new AbortController()
@@ -299,6 +340,12 @@ export class AgentSSEClient {
         return
       case 'page_complete':
         this.emitHandlers(this.pageCompleteHandlers, event.data)
+        return
+      case 'page_optimizing':
+        this.emitHandlers(this.pageOptimizingHandlers, event.data)
+        return
+      case 'page_updated':
+        this.emitHandlers(this.pageUpdatedHandlers, event.data)
         return
       case 'assistant_message':
         this.emitHandlers(this.assistantMessageHandlers, event.data)
@@ -438,6 +485,8 @@ function isKnownAgentSSEEventName(value: string): value is AgentSSEEventName {
     || value === 'deliberation_summary'
     || value === 'page_generating'
     || value === 'page_complete'
+    || value === 'page_optimizing'
+    || value === 'page_updated'
     || value === 'assistant_message'
     || value === 'error'
     || value === 'done'

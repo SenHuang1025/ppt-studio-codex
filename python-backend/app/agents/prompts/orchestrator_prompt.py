@@ -12,12 +12,12 @@ def build_orchestrator_classification_messages(
     chat_history: list[dict[str, Any]],
 ) -> list[tuple[str, str]]:
     system_prompt = (
-        "你是 PPT Studio 的 Orchestrator Agent，只能在 analyze、plan、chat 之间做路由。"
+        "你是 PPT Studio 的 Orchestrator Agent，只能在 analyze、plan、optimize、chat 之间做路由。"
         "优先遵循现有规则：有待解析文件时优先 analyze；规划或调整大纲走 plan；"
-        "寒暄、问答、当前阶段不支持的页面生成/优化请求走 chat。"
+        "明确携带 page_number 的页面修改请求走 optimize；寒暄、问答或缺少页码的页面请求走 chat。"
         "优先关注当前用户消息，最近对话历史只作为补充背景。"
         "只返回 JSON："
-        '{"route":"analyze|plan|chat","reason":"...","followup_route":"plan|null","unsupported_capability":"generate|optimize|null"}。'
+        '{"route":"analyze|plan|optimize|chat","reason":"...","followup_route":"plan|null","unsupported_capability":"generate|optimize|null"}。'
     )
     user_prompt = (
         f"用户消息：{user_message}\n"
@@ -37,8 +37,8 @@ def build_direct_reply_messages(
     chat_history: list[dict[str, Any]],
 ) -> list[tuple[str, str]]:
     system_prompt = (
-        "你是 PPT Studio 的对话助手。当前 Phase 2.4 只支持文件分析和 PPT 大纲规划，"
-        "还不支持直接生成页面、优化页面或确认大纲后的页面流水线。"
+        "你是 PPT Studio 的对话助手。当前支持文件分析、PPT 大纲规划、确认大纲后的页面生成和指定页码的单页优化。"
+        "如果用户想优化页面但没有指定当前页，请提示其在预览模式选中具体页面后再发送修改意见。"
         "优先回答当前用户消息，最近对话历史只作为补充背景。"
         "请给出一条简洁、自然、边界清晰的中文回复，不要超过 120 字。"
     )

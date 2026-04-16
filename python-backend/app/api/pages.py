@@ -17,11 +17,25 @@ from app.api.settings import get_settings_service
 from app.api.themes import get_theme_service
 from app.config import Settings, get_settings
 from app.db import get_db_session
-from app.schemas import OutlineSchema
+from app.schemas import (
+    OutlinePageSchema,
+    OutlineSchema,
+    PageInsertAfterRequest,
+    PageMutationResponse,
+    PageReorderRequest,
+    PageResponse,
+    PageRollbackRequest,
+    PageVersionResponse,
+)
 from app.services import (
     FileService,
+    InvalidPageOrderError,
+    PageMutationValidationError,
+    PageNotFoundError,
     PageService,
     PageServiceError,
+    PageStorageError,
+    PageVersionNotFoundError,
     PreviewSlideWriteError,
     ProjectNotFoundError,
     ProjectService,
@@ -48,12 +62,192 @@ def get_sse_manager(request: Request) -> SSEManager:
 
 
 def _raise_page_http_error(exc: Exception) -> NoReturn:
+    if isinstance(exc, PageNotFoundError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if isinstance(exc, PageVersionNotFoundError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if isinstance(exc, (InvalidPageOrderError, PageMutationValidationError)):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if isinstance(exc, (PageStorageError, PageServiceError, PreviewSlideWriteError)):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     if isinstance(exc, (MissingAPIKeyError, LLMConfigurationError)):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     raise exc
 
 
+@router.post("/{page_number}/confirm", response_model=PageResponse)
+async def confirm_page(
+    project_id: str,
+    page_number: int,
+    page_service: PageService = Depends(get_page_service),
+) -> PageResponse:
+    try:
+        return await page_service.confirm_page(
+            project_id=project_id,
+            page_number=page_number,
+        )
+    except Exception as exc:
+        _raise_page_http_error(exc)
+
+
+@router.get("/{page_number}/versions", response_model=list[PageVersionResponse])
+async def list_page_versions(
+    project_id: str,
+    page_number: int,
+    page_service: PageService = Depends(get_page_service),
+) -> list[PageVersionResponse]:
+    try:
+        return await page_service.list_page_versions(
+            project_id=project_id,
+            page_number=page_number,
+        )
+    except Exception as exc:
+        _raise_page_http_error(exc)
+
+
+@router.post("/{page_number}/rollback", response_model=PageResponse)
+async def rollback_page(
+    project_id: str,
+    page_number: int,
+    payload: PageRollbackRequest,
+    page_service: PageService = Depends(get_page_service),
+) -> PageResponse:
+    try:
+        page = await page_service.rollback_page_to_version(
+            project_id=project_id,
+            page_number=page_number,
+            target_version=payload.version,
+        )
+        page_service.write_preview_slide(page_number=page_number, vue_code=str(page.vue_code or ""))
+        return page
+    except Exception as exc:
+        _raise_page_http_error(exc)
+
+
+@router.post("/{page_number}/versions/{version}/preview", response_model=PageVersionResponse)
+async def preview_page_version(
+    project_id: str,
+    page_number: int,
+    version: int,
+    page_service: PageService = Depends(get_page_service),
+) -> PageVersionResponse:
+    try:
+        versions = await page_service.list_page_versions(
+            project_id=project_id,
+            page_number=page_number,
+        )
+        target = next((item for item in versions if item.version == version), None)
+        if target is None:
+            raise PageVersionNotFoundError(project_id, page_number, version)
+        page_service.write_version_preview_slide(
+            page_number=page_number,
+            vue_code=target.vue_code,
+        )
+        return target
+    except Exception as exc:
+        _raise_page_http_error(exc)
+
+
+@router.delete("/{page_number}", response_model=PageMutationResponse)
+async def delete_page(
+    project_id: str,
+    page_number: int,
+    page_service: PageService = Depends(get_page_service),
+) -> PageMutationResponse:
+    try:
+        await page_service.delete_page(project_id=project_id, page_number=page_number)
+        return PageMutationResponse()
+    except Exception as exc:
+        _raise_page_http_error(exc)
+
+
+@router.post("/{page_number}/duplicate", response_model=PageResponse)
+async def duplicate_page(
+    project_id: str,
+    page_number: int,
+    page_service: PageService = Depends(get_page_service),
+) -> PageResponse:
+    try:
+        return await page_service.duplicate_page(project_id=project_id, page_number=page_number)
+    except Exception as exc:
+        _raise_page_http_error(exc)
+
+
+@router.put("/reorder", response_model=PageMutationResponse)
+async def reorder_pages(
+    project_id: str,
+    payload: PageReorderRequest,
+    page_service: PageService = Depends(get_page_service),
+) -> PageMutationResponse:
+    try:
+        await page_service.reorder_pages(
+            project_id=project_id,
+            ordered_page_numbers=payload.page_numbers,
+        )
+        return PageMutationResponse()
+    except Exception as exc:
+        _raise_page_http_error(exc)
+
+
+@router.post("/{page_number}/insert-after", response_model=PageResponse)
+async def insert_page_after(
+    project_id: str,
+    page_number: int,
+    payload: PageInsertAfterRequest,
+    request: Request,
+    file_service: FileService = Depends(get_file_service),
+    page_service: PageService = Depends(get_page_service),
+    project_service: ProjectService = Depends(get_project_service),
+    settings_service: SettingsService = Depends(get_settings_service),
+    theme_service: ThemeService = Depends(get_theme_service),
+) -> PageResponse:
+    api_key = request.headers.get(API_KEY_HEADER, "").strip()
+
+    try:
+        llm_runtime = await build_llm_runtime(
+            settings_service=settings_service,
+            api_key=api_key,
+        )
+        project = await project_service.get_project_detail(project_id)
+        total_pages_before_insert = _resolve_insert_total_pages(project)
+        if page_number < 1 or page_number > total_pages_before_insert:
+            raise PageNotFoundError(project_id, page_number)
+
+        outline = _resolve_outline_for_insert(project=project, after_page_number=page_number, description=payload.description)
+        parsed_contents = await _load_page_generation_sources(file_service=file_service, project_id=project_id)
+        resolved_theme = theme_service.resolve_theme(project.theme_config)
+        theme_service.write_preview_theme(resolved_theme)
+        page_generation_context = page_service.build_page_generation_context(
+            project=project,
+            outline_page=outline,
+            parsed_contents=parsed_contents,
+        )
+        total_pages_after_insert = total_pages_before_insert + 1
+        page_code = await generate_page_code(
+            project=project,
+            outline_page=outline,
+            parsed_contents=parsed_contents,
+            theme_config=resolved_theme,
+            current_page_number=outline.page_number,
+            total_pages=total_pages_after_insert,
+            existing_page_code=None,
+            model=llm_runtime.chat_model,
+            deliberation_enabled=llm_runtime.settings.multi_agent_deliberation_enabled,
+            page_generation_context=page_generation_context,
+        )
+        return await page_service.insert_generated_page_after(
+            project_id=project_id,
+            after_page_number=page_number,
+            outline_page=outline,
+            vue_code=page_code,
+            change_description=f"插入新页：{_truncate_insert_description(payload.description)}",
+        )
+    except Exception as exc:
+        _raise_page_http_error(exc)
+
+
 @router.post("/{page_number}/generate")
+@router.post("/{page_number}/regenerate")
 async def generate_single_page(
     project_id: str,
     page_number: int,
@@ -186,7 +380,7 @@ async def _produce_page_generation_events(
         )
 
         page_service.write_preview_slide(page_number=page_number, vue_code=page_code)
-        await page_service.upsert_generated_page(
+        saved_page = await page_service.upsert_generated_page(
             project_id=project_id,
             page_number=page_number,
             title=outline_page.title,
@@ -202,6 +396,7 @@ async def _produce_page_generation_events(
                 "page_number": page_number,
                 "title": outline_page.title,
                 "status": "generated",
+                "version": getattr(saved_page, "version", None),
                 "vue_code": page_code,
             },
             stream_id=stream_id,
@@ -284,6 +479,69 @@ def _resolve_existing_page_code(*, project: Any, page_number: int) -> str | None
         if getattr(page, "page_number", None) == page_number:
             return getattr(page, "vue_code", None)
     return None
+
+
+def _resolve_outline_for_insert(*, project: Any, after_page_number: int, description: str) -> OutlinePageSchema:
+    next_page_number = after_page_number + 1
+    normalized_description = description.strip()
+    title = _derive_insert_page_title(normalized_description, next_page_number)
+    reference_layout = _resolve_reference_outline_layout(project=project, after_page_number=after_page_number)
+
+    return OutlinePageSchema(
+        page_number=next_page_number,
+        title=title,
+        type="content",
+        content_brief=normalized_description,
+        layout=reference_layout,
+        data_refs=[],
+    )
+
+
+def _resolve_reference_outline_layout(*, project: Any, after_page_number: int) -> str:
+    outline = getattr(project, "outline", None)
+    pages = outline.get("pages") if isinstance(outline, dict) else None
+    if isinstance(pages, list):
+        for page in pages:
+            if isinstance(page, dict) and page.get("page_number") == after_page_number:
+                layout = _normalized_text(page.get("layout"))
+                if layout:
+                    return layout
+
+    return "title-body"
+
+
+def _resolve_insert_total_pages(project: Any) -> int:
+    outline = getattr(project, "outline", None)
+    outline_total = outline.get("total_pages") if isinstance(outline, dict) else 0
+    pages = getattr(project, "pages", None) or []
+    highest_page_number = max(
+        (getattr(page, "page_number", 0) or 0 for page in pages),
+        default=0,
+    )
+    return max(int(getattr(project, "total_pages", 0) or 0), int(outline_total or 0), int(highest_page_number or 0))
+
+
+def _derive_insert_page_title(description: str, page_number: int) -> str:
+    normalized = " ".join(description.split())
+    if not normalized:
+        return f"新增第 {page_number} 页"
+
+    first_sentence = normalized
+    for separator in ("。", "！", "？", "\n"):
+        if separator in first_sentence:
+            first_sentence = first_sentence.split(separator, 1)[0].strip()
+            break
+
+    if len(first_sentence) <= 28:
+        return first_sentence
+    return f"{first_sentence[:25].rstrip()}..."
+
+
+def _truncate_insert_description(description: str) -> str:
+    normalized = " ".join(description.split())
+    if len(normalized) <= 40:
+        return normalized
+    return f"{normalized[:37].rstrip()}..."
 
 
 def _normalized_text(value: Any) -> str:

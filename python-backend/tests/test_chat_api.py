@@ -65,6 +65,47 @@ def test_chat_api_can_include_global_messages_for_page_history(
     ]
 
 
+def test_chat_api_can_include_page_messages_in_project_history(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = asyncio.run(seed_chat_api_project(settings=settings, session_factory=session_factory))
+    app = build_test_app(settings=settings, session_factory=session_factory)
+
+    with TestClient(app) as client:
+      response = client.get(f"/api/projects/{project_id}/chat/messages?include_page_messages=true")
+
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["total"] == 3
+    assert [message["content"] for message in payload["messages"]] == [
+        "请先规划项目级大纲",
+        "已生成《项目总览》共 3 页大纲。",
+        "第 3 页需要加一组关键风险",
+    ]
+    assert payload["messages"][2]["page_number"] == 3
+
+
+def test_project_detail_includes_page_chat_message_counts(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = asyncio.run(seed_chat_api_project(settings=settings, session_factory=session_factory))
+    app = build_test_app(settings=settings, session_factory=session_factory)
+    asyncio.run(seed_page_records(settings=settings, session_factory=session_factory, project_id=project_id))
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/projects/{project_id}")
+
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert [page["page_number"] for page in payload["pages"]] == [1, 3]
+    assert payload["pages"][0]["chat_message_count"] == 0
+    assert payload["pages"][1]["chat_message_count"] == 1
+
+
 def build_test_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
     app = FastAPI()
     app.include_router(projects_router)
@@ -125,3 +166,29 @@ async def seed_chat_api_project(
 
         await session.commit()
         return project.id
+
+
+async def seed_page_records(
+    *,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    project_id: str,
+) -> None:
+    from app.services import PageService
+
+    async with session_factory() as session:
+        page_service = PageService(session=session, settings=settings)
+        await page_service.upsert_generated_page(
+            project_id=project_id,
+            page_number=1,
+            title="封面",
+            page_type="cover",
+            vue_code="<script setup lang=\"ts\"></script><template><main></main></template>",
+        )
+        await page_service.upsert_generated_page(
+            project_id=project_id,
+            page_number=3,
+            title="关键结论",
+            page_type="content",
+            vue_code="<script setup lang=\"ts\"></script><template><main></main></template>",
+        )

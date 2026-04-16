@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { defineComponent, h, type Component } from 'vue'
+import VersionPreviewPage from './VersionPreviewPage.vue'
 
 type SlideModule = {
   default: Component
@@ -114,7 +115,6 @@ const missingSlideView = createStateView(
   'Slide not found',
   'The requested slide route does not currently have a matching page-*.vue file.'
 )
-
 const firstPageNumber = slideEntries[0]?.pageNumber ?? null
 
 const routes: RouteRecordRaw[] = [
@@ -132,6 +132,10 @@ const routes: RouteRecordRaw[] = [
     name: `slide-${pageNumber}`,
     component: loader
   })),
+  {
+    path: '/version-preview',
+    component: VersionPreviewPage
+  },
   {
     path: '/:pathMatch(.*)*',
     component: slideEntries.length > 0 ? missingSlideView : emptySlidesView

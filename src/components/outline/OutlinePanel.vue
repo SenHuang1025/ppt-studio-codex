@@ -10,12 +10,14 @@ const props = withDefaults(
     confirming?: boolean
     disabled?: boolean
     outline: Outline | null
+    previewLinkEnabled?: boolean
     projectName: string
   }>(),
   {
     activePageNumber: null,
     confirming: false,
-    disabled: false
+    disabled: false,
+    previewLinkEnabled: false
   }
 )
 
@@ -23,6 +25,7 @@ const emit = defineEmits<{
   adjust: []
   confirm: []
   'select-page': [pageNumber: number]
+  preview: [pageNumber: number]
 }>()
 
 const expandedPageNumbers = ref<number[]>([])
@@ -117,6 +120,8 @@ function ensurePageVisible(pageNumber: number): void {
           :active="activePageNumber === page.page_number"
           :expanded="expandedPageNumbers.includes(page.page_number)"
           :page="page"
+          :preview-link-enabled="previewLinkEnabled"
+          @preview="emit('preview', $event)"
           @toggle="togglePage"
         />
       </div>

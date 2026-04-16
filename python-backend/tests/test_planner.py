@@ -185,6 +185,13 @@ def build_state(*, deliberation_enabled: bool) -> tuple[ProjectState, EventRecor
         existing_outline=None,
         post_analyze_route=None,
         draft_outline=None,
+        pages={},
+        global_theme=None,
+        generated_page=None,
+        generation_target_page=None,
+        draft_page_code=None,
+        optimized_page=None,
+        draft_optimized_page_code=None,
         persistable_assistant_message=None,
     )
     return state, recorder

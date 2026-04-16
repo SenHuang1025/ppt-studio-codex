@@ -124,7 +124,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
         realtimeState: pageGenerationStates.value[pageNumber] ?? null
       })
 
-      if (status === 'generated') {
+      if (status === 'generated' || status === 'confirmed') {
         generatedCount += 1
         continue
       }
@@ -711,6 +711,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
       ...createSessionMeta('user'),
       content,
       dedupeKey: buildMessageDedupeKey('user', 'text', content),
+      pageNumber: null,
       type: 'user_message'
     }
   }
@@ -722,6 +723,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
       content,
       contentFormat: 'markdown',
       dedupeKey: buildMessageDedupeKey('assistant', 'text', content),
+      pageNumber: null,
       type: 'assistant_message'
     }
   }
@@ -913,7 +915,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
 
   function hasGeneratedPreviewForPage(pageNumber: number): boolean {
     const realtimeState = pageGenerationStates.value[pageNumber]
-    if (realtimeState?.status === 'generated') {
+    if (realtimeState?.status === 'generated' || realtimeState?.status === 'confirmed') {
       return true
     }
 

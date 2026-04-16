@@ -1,28 +1,91 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { NInput, NTag } from 'naive-ui'
+import { NTag } from 'naive-ui'
 import GlassPanel from '@/components/common/GlassPanel.vue'
 import GenerationProgressBanner from '@/components/preview/GenerationProgressBanner.vue'
+import PageOptimizeChat from '@/components/preview/PageOptimizeChat.vue'
+import PreviewProjectChatEntry from '@/components/preview/PreviewProjectChatEntry.vue'
+import QuickActions from '@/components/preview/QuickActions.vue'
 import SlideControls from '@/components/preview/SlideControls.vue'
 import SlideRenderer from '@/components/preview/SlideRenderer.vue'
 import ThemePresetPicker from '@/components/preview/ThemePresetPicker.vue'
 import ThumbnailNav from '@/components/preview/ThumbnailNav.vue'
-import type { PreviewPageItem, WorkspaceGenerationProgressState } from '@/types/preview'
+import VersionHistoryDrawer from '@/components/preview/VersionHistoryDrawer.vue'
+import type { AgentConnectionState, AgentEventLogItem, ChatTimelineItem } from '@/types/chat'
+import type { PageVersion } from '@/types/project'
+import type {
+  PreviewPageItem,
+  PreviewRefreshRequest,
+  PreviewRenderTargetKind,
+  PreviewVersionSelection,
+  WorkspaceGenerationProgressState
+} from '@/types/preview'
 import type { ThemeConfig } from '@/types/theme'
-import { formatPreviewPageType, formatPreviewUpdatedAt, getPreviewPageStatusLabel } from '@/utils/preview'
+import {
+  formatPreviewPageType,
+  formatPreviewUpdatedAt,
+  formatPreviewVersionHistoryLabel,
+  getPreviewPageStatusLabel
+} from '@/utils/preview'
 
 const props = withDefaults(defineProps<{
   activeThemeId: string
+  activeOptimizingPageNumber?: number | null
   applyingThemeId?: string | null
+  optimizeChatConnectionState?: AgentConnectionState
+  optimizeCurrentActionLabel?: string | null
+  optimizeChatDebugEvents?: AgentEventLogItem[]
+  optimizeChatDraft?: string
+  optimizeChatError?: string | null
+  optimizeChatLoaded?: boolean
+  optimizeChatLoading?: boolean
+  optimizePreviewRefreshRequest?: PreviewRefreshRequest | null
+  optimizeConfirmingPage?: boolean
+  optimizeChatSubmitting?: boolean
+  optimizeChatTimelineItems?: ChatTimelineItem[]
+  projectChatExpanded?: boolean
+  projectChatLoaded?: boolean
+  projectChatLoading?: boolean
+  projectChatTimelineItems?: ChatTimelineItem[]
   currentPageNumber: number
   generationProgress: WorkspaceGenerationProgressState
+  versionDrawerLoading?: boolean
+  versionDrawerPageNumber?: number | null
+  versionDrawerRollingBack?: boolean
+  versionDrawerRollingBackVersion?: number | null
+  versionDrawerSelectedVersion?: PreviewVersionSelection | null
+  versionDrawerShow?: boolean
+  versionDrawerVersions?: PageVersion[]
   themeError?: string | null
   themeLoading?: boolean
   themeSyncing?: boolean
   themes: ThemeConfig[]
   items: PreviewPageItem[]
 }>(), {
+  activeOptimizingPageNumber: null,
   applyingThemeId: null,
+  optimizeChatConnectionState: 'idle',
+  optimizeCurrentActionLabel: null,
+  optimizeChatDebugEvents: () => [],
+  optimizeChatDraft: '',
+  optimizeChatError: null,
+  optimizeChatLoaded: false,
+  optimizeChatLoading: false,
+  optimizePreviewRefreshRequest: null,
+  optimizeConfirmingPage: false,
+  optimizeChatSubmitting: false,
+  optimizeChatTimelineItems: () => [],
+  projectChatExpanded: false,
+  projectChatLoaded: false,
+  projectChatLoading: false,
+  projectChatTimelineItems: () => [],
+  versionDrawerLoading: false,
+  versionDrawerPageNumber: null,
+  versionDrawerRollingBack: false,
+  versionDrawerRollingBackVersion: null,
+  versionDrawerSelectedVersion: null,
+  versionDrawerShow: false,
+  versionDrawerVersions: () => [],
   themeError: null,
   themeLoading: false,
   themeSyncing: false
@@ -30,13 +93,31 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   applyTheme: [theme: ThemeConfig]
+  deletePage: [pageNumber: number]
+  duplicatePage: [pageNumber: number]
+  insertPageAfter: [pageNumber: number]
   nextPage: []
+  openChatMode: []
+  optimizeConfirmPage: []
+  optimizeMessageRevealComplete: [itemId: string]
+  projectMessageRevealComplete: [itemId: string]
+  optimizeQuickPrompt: [payload: { actionLabel: string; prompt: string }]
+  optimizeRegeneratePage: []
+  optimizeSubmit: [value: string]
+  previewPageVersion: [version: PageVersion]
   previousPage: []
+  reorderPages: [pageNumbers: number[]]
+  rollbackPageVersion: [version: PageVersion]
   retryTheme: []
   selectPage: [pageNumber: number]
+  showPageVersionHistory: [pageNumber: number]
+  'update:projectChatExpanded': [value: boolean]
+  'update:versionDrawerShow': [value: boolean]
+  'update:optimizeChatDraft': [value: string]
 }>()
 
-const rendererRefreshKey = ref(0)
+const rendererManualRefreshTick = ref(0)
+const pageOptimizeChatRef = ref<InstanceType<typeof PageOptimizeChat> | null>(null)
 const currentPageItem = computed<PreviewPageItem | null>(() =>
   props.items.find((item) => item.pageNumber === props.currentPageNumber) ?? props.items[0] ?? null
 )
@@ -48,6 +129,8 @@ const currentPageStatusLabel = computed<string>(() =>
 )
 const currentPageStatusTagType = computed<'default' | 'success' | 'warning'>(() => {
   switch (currentPageItem.value?.status) {
+    case 'confirmed':
+      return 'success'
     case 'generated':
       return 'success'
     case 'generating':
@@ -68,12 +151,29 @@ const currentPageLayoutLabel = computed<string>(() => currentPageItem.value?.lay
 const currentPageContentBrief = computed<string>(() =>
   currentPageItem.value?.contentBrief || '当前页摘要会在 outline 与 generated page 信息稳定后持续补齐。'
 )
+const currentPreviewVersionLabel = computed<string | null>(() =>
+  formatPreviewVersionHistoryLabel(
+    props.versionDrawerSelectedVersion?.pageNumber === (currentPageItem.value?.pageNumber ?? props.currentPageNumber)
+      ? props.versionDrawerSelectedVersion
+      : null
+  )
+)
 const currentPageHasGeneratedCode = computed<boolean>(() => Boolean(currentPageItem.value?.hasGeneratedCode))
-const canRefreshCurrentPage = computed<boolean>(() => currentPageItem.value?.status === 'generated')
+const canRefreshCurrentPage = computed<boolean>(() =>
+  Boolean(currentRendererOverrideCode.value)
+    || currentPageItem.value?.status === 'generated'
+    || currentPageItem.value?.status === 'confirmed'
+)
 const refreshDisabledReason = computed<string>(() => {
+  if (currentRendererOverrideCode.value) {
+    return ''
+  }
+
   switch (currentPageItem.value?.status) {
     case 'generating':
       return '当前页还在生成中，完成后才能刷新 iframe。'
+    case 'confirmed':
+      return ''
     case 'generated':
       return ''
     default:
@@ -88,14 +188,70 @@ const pageInfoRows = computed<Array<{ label: string; value: string }>>(() => [
   { label: '最后更新时间', value: currentPageUpdatedLabel.value },
   { label: 'Vue SFC', value: currentPageHasGeneratedCode.value ? '已生成' : '尚未写入' }
 ])
+const currentRendererOverrideCode = computed<string | null>(() =>
+  props.versionDrawerSelectedVersion?.pageNumber === (currentPageItem.value?.pageNumber ?? props.currentPageNumber)
+    ? props.versionDrawerSelectedVersion.vueCode
+    : null
+)
+const currentRendererTargetKind = computed<PreviewRenderTargetKind>(() =>
+  currentRendererOverrideCode.value ? 'version' : 'live'
+)
+const currentRendererSignature = computed<string>(() => {
+  const pageNumber = currentPageItem.value?.pageNumber ?? props.currentPageNumber
+
+  if (currentRendererTargetKind.value === 'version' && props.versionDrawerSelectedVersion) {
+    return [
+      'version',
+      pageNumber,
+      props.versionDrawerSelectedVersion.sourceVersion,
+      props.versionDrawerSelectedVersion.previewToken
+    ].join(':')
+  }
+
+  const refreshRequest = props.optimizePreviewRefreshRequest
+  const requestedVersion = refreshRequest?.pageNumber === pageNumber ? refreshRequest.version : null
+
+  return [
+    'live',
+    pageNumber,
+    currentPageItem.value?.status ?? 'pending',
+    currentPageItem.value?.generatedPage?.id ?? 'page-slot',
+    requestedVersion ?? currentPageItem.value?.version ?? 0
+  ].join(':')
+})
+const currentRendererAutoRefreshSequence = computed<number>(() => {
+  const pageNumber = currentPageItem.value?.pageNumber ?? props.currentPageNumber
+  if (currentRendererTargetKind.value !== 'live') {
+    return 0
+  }
+
+  return props.optimizePreviewRefreshRequest?.pageNumber === pageNumber
+    ? props.optimizePreviewRefreshRequest.sequence
+    : 0
+})
+const rendererRefreshToken = computed<string>(() =>
+  [
+    currentRendererSignature.value,
+    `auto:${currentRendererAutoRefreshSequence.value}`,
+    `manual:${rendererManualRefreshTick.value}`
+  ].join('|')
+)
 
 function requestCurrentPageRefresh(): void {
   if (!canRefreshCurrentPage.value) {
     return
   }
 
-  rendererRefreshKey.value += 1
+  rendererManualRefreshTick.value += 1
 }
+
+function focusOptimizeComposer(): void {
+  pageOptimizeChatRef.value?.focusComposer()
+}
+
+defineExpose({
+  focusOptimizeComposer
+})
 </script>
 
 <template>
@@ -105,6 +261,11 @@ function requestCurrentPageRefresh(): void {
         :current-page-number="currentPageNumber"
         :generation-progress="generationProgress"
         :items="items"
+        @delete-page="emit('deletePage', $event)"
+        @duplicate-page="emit('duplicatePage', $event)"
+        @insert-page-after="emit('insertPageAfter', $event)"
+        @open-version-history="emit('showPageVersionHistory', $event)"
+        @reorder-pages="emit('reorderPages', $event)"
         @select-page="emit('selectPage', $event)"
       />
     </GlassPanel>
@@ -129,6 +290,9 @@ function requestCurrentPageRefresh(): void {
           <NTag round :bordered="false" type="default">
             {{ currentPageVersionLabel }}
           </NTag>
+          <NTag v-if="currentPreviewVersionLabel" round :bordered="false" type="warning">
+            {{ currentPreviewVersionLabel }}
+          </NTag>
         </div>
       </div>
 
@@ -144,7 +308,8 @@ function requestCurrentPageRefresh(): void {
         :page-number="currentPageItem?.pageNumber ?? currentPageNumber"
         :page-status="currentPageItem?.status ?? 'pending'"
         :page-title="currentPageItem?.title ?? `第 ${currentPageNumber} 页`"
-        :refresh-key="rendererRefreshKey"
+        :preview-override-code="currentRendererOverrideCode"
+        :refresh-token="rendererRefreshToken"
       />
 
       <SlideControls
@@ -163,6 +328,18 @@ function requestCurrentPageRefresh(): void {
     </section>
 
     <GlassPanel variant="strong" class="flex min-h-0 flex-col gap-5 p-5">
+      <QuickActions
+        :busy="optimizeChatSubmitting || optimizeConfirmingPage"
+        :confirming="optimizeConfirmingPage"
+        :current-action-label="optimizeCurrentActionLabel"
+        :current-page-item="currentPageItem"
+        :current-page-number="currentPageNumber"
+        :disabled="!currentPageHasGeneratedCode"
+        @confirm-page="emit('optimizeConfirmPage')"
+        @quick-prompt="emit('optimizeQuickPrompt', $event)"
+        @regenerate-page="emit('optimizeRegeneratePage')"
+      />
+
       <ThemePresetPicker
         :active-theme-id="activeThemeId"
         :applying-theme-id="applyingThemeId"
@@ -174,13 +351,17 @@ function requestCurrentPageRefresh(): void {
         @retry="emit('retryTheme')"
       />
 
-      <div>
-        <p class="mono-meta mb-2 text-[color:var(--app-text-tertiary)]">单页优化区</p>
-        <h2 class="m-0 text-xl font-semibold">{{ currentPageTitle }}</h2>
-        <div class="mt-2 text-sm text-[color:var(--app-text-secondary)]">
-          当前聚焦第 {{ currentPageItem?.pageNumber ?? currentPageNumber }} 页，右侧已展示这页的真实 outline / generated 信息。
-        </div>
-      </div>
+      <PreviewProjectChatEntry
+        :current-page-number="currentPageNumber"
+        :expanded="projectChatExpanded"
+        :loaded="projectChatLoaded"
+        :loading="projectChatLoading"
+        :timeline-items="projectChatTimelineItems"
+        @back-to-chat="emit('openChatMode')"
+        @focus-page="emit('selectPage', $event)"
+        @message-reveal-complete="emit('projectMessageRevealComplete', $event)"
+        @toggle="emit('update:projectChatExpanded', $event)"
+      />
 
       <div class="rounded-[var(--radius-xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)] p-4">
         <div class="mono-meta mb-3 text-[color:var(--app-text-tertiary)]">当前页信息</div>
@@ -206,44 +387,38 @@ function requestCurrentPageRefresh(): void {
         </div>
       </div>
 
-      <div class="grid gap-3">
-        <button
-          class="cursor-not-allowed rounded-[var(--radius-lg)] border border-[color:var(--app-border-subtle)] bg-[rgba(255,255,255,0.48)] px-4 py-3 text-left opacity-70"
-          disabled
-          type="button"
-        >
-          <div class="text-sm text-[color:var(--app-text-primary)]">调整版式平衡</div>
-          <div class="mt-1 text-xs text-[color:var(--app-text-secondary)]">Phase 4 接入真实单页优化后开放。</div>
-        </button>
-        <button
-          class="cursor-not-allowed rounded-[var(--radius-lg)] border border-[color:var(--app-border-subtle)] bg-[rgba(255,255,255,0.48)] px-4 py-3 text-left opacity-70"
-          disabled
-          type="button"
-        >
-          <div class="text-sm text-[color:var(--app-text-primary)]">替换配色强调</div>
-          <div class="mt-1 text-xs text-[color:var(--app-text-secondary)]">当前仅展示入口，不执行真实页面改写。</div>
-        </button>
-        <button
-          class="cursor-not-allowed rounded-[var(--radius-lg)] border border-[color:var(--app-border-subtle)] bg-[rgba(255,255,255,0.48)] px-4 py-3 text-left opacity-70"
-          disabled
-          type="button"
-        >
-          <div class="text-sm text-[color:var(--app-text-primary)]">查看版本历史</div>
-          <div class="mt-1 text-xs text-[color:var(--app-text-secondary)]">本阶段只显示版本号，历史抽屉留给后续阶段。</div>
-        </button>
-      </div>
-
-      <div class="rounded-[var(--radius-xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-card)] p-4 text-sm leading-6 text-[color:var(--app-text-secondary)]">
-        本阶段重点是把预览浏览与生成反馈补稳：真实页信息可读、翻页可持续、刷新可控。单页优化对话和版本抽屉仍留给后续阶段。
-      </div>
-
-      <NInput
-        disabled
-        type="textarea"
-        :autosize="{ minRows: 3, maxRows: 5 }"
-        placeholder="单页优化对话将在后续阶段接入；当前输入框仅保留布局与信息层次。"
-        size="large"
+      <PageOptimizeChat
+        ref="pageOptimizeChatRef"
+        :active-optimizing-page-number="activeOptimizingPageNumber"
+        :connection-state="optimizeChatConnectionState"
+        :current-page-item="currentPageItem"
+        :debug-events="optimizeChatDebugEvents"
+        :disabled="!currentPageHasGeneratedCode"
+        :draft="optimizeChatDraft"
+        :error="optimizeChatError"
+        :loaded="optimizeChatLoaded"
+        :loading="optimizeChatLoading"
+        :page-updated-at="currentPageUpdatedLabel"
+        :submitting="optimizeChatSubmitting"
+        :timeline-items="optimizeChatTimelineItems"
+        @message-reveal-complete="emit('optimizeMessageRevealComplete', $event)"
+        @submit="emit('optimizeSubmit', $event)"
+        @update:draft="emit('update:optimizeChatDraft', $event)"
       />
     </GlassPanel>
+
+    <VersionHistoryDrawer
+      :loading="versionDrawerLoading"
+      :page-number="versionDrawerPageNumber ?? currentPageNumber"
+      :rolling-back="versionDrawerRollingBack"
+      :rolling-back-version="versionDrawerRollingBackVersion"
+      :selected-version="versionDrawerSelectedVersion ?? null"
+      :show="versionDrawerShow"
+      :versions="versionDrawerVersions"
+      @close="emit('update:versionDrawerShow', false)"
+      @preview-version="emit('previewPageVersion', $event)"
+      @rollback-version="emit('rollbackPageVersion', $event)"
+      @update:show="emit('update:versionDrawerShow', $event)"
+    />
   </div>
 </template>

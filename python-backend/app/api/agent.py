@@ -58,9 +58,11 @@ async def chat_with_agent(
     request: Request,
     file_service: FileService = Depends(get_file_service),
     chat_service: ChatService = Depends(get_chat_service),
+    page_service: PageService = Depends(get_page_service),
     project_service: ProjectService = Depends(get_project_service),
     settings_service: SettingsService = Depends(get_settings_service),
     sse_manager: SSEManager = Depends(get_sse_manager),
+    theme_service: ThemeService = Depends(get_theme_service),
 ) -> EventSourceResponse:
     api_key = request.headers.get(API_KEY_HEADER, "").strip()
 
@@ -79,11 +81,13 @@ async def chat_with_agent(
             _produce_agent_events(
                 file_service=file_service,
                 chat_service=chat_service,
+                page_service=page_service,
                 project_id=project_id,
                 project_service=project_service,
                 request_payload=payload,
                 sse_manager=sse_manager,
                 stream_id=stream_id,
+                theme_service=theme_service,
                 llm_runtime=llm_runtime,
             )
         )
@@ -175,11 +179,13 @@ async def _produce_agent_events(
     *,
     chat_service: ChatService,
     file_service: FileService,
+    page_service: PageService,
     project_id: str,
     project_service: ProjectService,
     request_payload: AgentChatRequest,
     sse_manager: SSEManager,
     stream_id: str,
+    theme_service: ThemeService,
     llm_runtime: object,
 ) -> None:
     cancelled = False
@@ -202,7 +208,9 @@ async def _produce_agent_events(
             context=AgentGraphContext(
                 chat_service=chat_service,
                 file_service=file_service,
+                page_service=page_service,
                 project_service=project_service,
+                theme_service=theme_service,
                 llm_runtime=llm_runtime,
             ),
             sse_callback=sse_callback,
@@ -342,7 +350,7 @@ async def _produce_confirm_outline_events(
                 page_number=outline_page.page_number,
                 vue_code=page_code,
             )
-            await page_service.upsert_generated_page(
+            saved_page = await page_service.upsert_generated_page(
                 project_id=project_id,
                 page_number=outline_page.page_number,
                 title=outline_page.title,
@@ -359,6 +367,7 @@ async def _produce_confirm_outline_events(
                     "page_number": outline_page.page_number,
                     "title": outline_page.title,
                     "status": "generated",
+                    "version": getattr(saved_page, "version", None),
                     "vue_code": page_code,
                 },
                 stream_id=stream_id,

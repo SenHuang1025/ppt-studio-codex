@@ -41,6 +41,8 @@ export const AGENT_SSE_EVENT_NAMES = [
   'deliberation_summary',
   'page_generating',
   'page_complete',
+  'page_optimizing',
+  'page_updated',
   'assistant_message',
   'error',
   'done'
@@ -77,6 +79,7 @@ export interface ChatTimelineBaseItem {
 
 export interface UserChatTimelineItem extends ChatTimelineBaseItem {
   content: string
+  pageNumber: number | null
   type: 'user_message'
 }
 
@@ -84,6 +87,7 @@ export interface AssistantChatTimelineItem extends ChatTimelineBaseItem {
   animate?: boolean
   content: string
   contentFormat: 'markdown' | 'plain'
+  pageNumber: number | null
   type: 'assistant_message'
 }
 
@@ -161,17 +165,20 @@ export interface OutlineEventPayload {
 }
 
 export interface DeliberationStartedEventPayload {
+  page_number?: number
   rounds: number
   target: string
 }
 
 export interface DeliberationRoundEventPayload {
   content: string
+  page_number?: number
   role: string
   target: string
 }
 
 export interface DeliberationSummaryEventPayload {
+  page_number?: number
   summary: string
   target: string
 }
@@ -186,11 +193,28 @@ export interface PageCompleteEventPayload {
   page_number: number
   status: string
   title: string
+  version?: number | null
   vue_code: string
 }
 
 export interface AssistantMessageEventPayload {
   content: string
+  page_number?: number
+}
+
+export interface PageOptimizingEventPayload {
+  page_number: number
+  status: string
+  title: string
+}
+
+export interface PageUpdatedEventPayload {
+  change_description: string | null
+  page_number: number
+  status: string
+  title: string | null
+  version: number | null
+  vue_code: string
 }
 
 export interface ErrorEventPayload {
@@ -208,6 +232,8 @@ export interface AgentSSEEventMap {
   deliberation_summary: DeliberationSummaryEventPayload
   page_generating: PageGeneratingEventPayload
   page_complete: PageCompleteEventPayload
+  page_optimizing: PageOptimizingEventPayload
+  page_updated: PageUpdatedEventPayload
   assistant_message: AssistantMessageEventPayload
   error: ErrorEventPayload
   done: DoneEventPayload

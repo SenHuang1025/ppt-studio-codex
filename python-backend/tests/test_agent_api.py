@@ -19,7 +19,7 @@ from app.api.agent import router as agent_router
 from app.api.projects import router as projects_router
 from app.config import Settings, get_settings
 from app.db import get_db_session
-from app.models import ChatMessage
+from app.models import ChatMessage, PageVersion, ProjectPage
 from app.schemas import AppTheme, LLMProvider, ProjectCreate, SettingsResponse
 from app.services import FileService, ProjectService, SSEManager
 
@@ -122,6 +122,37 @@ const highlights = ['营收增长', '续约提效', '计划推进']
   overflow: hidden;
   background: var(--slide-bg);
   color: var(--slide-text);
+}
+</style>
+""".strip()
+
+OPTIMIZED_SFC = """
+<script setup lang="ts">
+const highlights = ['营收增长', '续约提效', '计划推进']
+</script>
+
+<template>
+  <main class="slide-page">
+    <section class="hero">
+      <h1 class="page-title">经营亮点</h1>
+      <ul>
+        <li v-for="item in highlights" :key="item">{{ item }}</li>
+      </ul>
+    </section>
+  </main>
+</template>
+
+<style scoped>
+.slide-page {
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+  background: var(--slide-bg);
+  color: var(--slide-text);
+}
+
+.page-title {
+  color: var(--slide-danger);
 }
 </style>
 """.strip()
@@ -442,6 +473,167 @@ def test_agent_chat_reuses_persisted_history_on_second_request(
     assert "在现有基础上新增一页风险提示" in second_request_prompt
 
 
+def test_agent_chat_optimizes_page_and_persists_page_version(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(create_project(settings=local_settings, session_factory=session_factory, with_file=False))
+    asyncio.run(seed_generated_page(session_factory=session_factory, settings=local_settings, project_id=project_id))
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+    fake_model = install_fake_runtime(
+        monkeypatch,
+        responses=[OPTIMIZED_SFC, "标题改为红色"],
+        deliberation_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            f"/api/projects/{project_id}/agent/chat",
+            headers={"x-ppt-studio-api-key": "test-api-key"},
+            json={"message": "把标题改成红色", "page_number": 1},
+        ) as response:
+            payload = "".join(response.iter_text())
+
+        project_response = client.get(f"/api/projects/{project_id}")
+
+    events = parse_sse_events(payload)
+    event_names = [event["event"] for event in events]
+    project_payload = project_response.json()
+    updated_event = next(event for event in events if event["event"] == "page_updated")
+    messages = asyncio.run(load_chat_messages(session_factory=session_factory, project_id=project_id))
+    versions = asyncio.run(load_page_versions(session_factory=session_factory, project_id=project_id, page_number=1))
+
+    assert response.status_code == 200
+    assert "page_optimizing" in event_names
+    assert "page_updated" in event_names
+    assert "assistant_message" in event_names
+    assert event_names[-1] == "done"
+    assert updated_event["data"]["page_number"] == 1
+    assert updated_event["data"]["change_description"] == "标题改为红色"
+    assert updated_event["data"]["vue_code"] == OPTIMIZED_SFC
+    assert len(fake_model.calls) == 2
+    assert "把标题改成红色" in fake_model.calls[0][1][1]
+    assert project_response.status_code == 200
+    assert project_payload["pages"][0]["version"] == 2
+    assert project_payload["pages"][0]["vue_code"] == OPTIMIZED_SFC
+    assert project_payload["pages"][0]["title"] == "经营亮点"
+    assert project_payload["pages"][0]["chat_message_count"] == 2
+    assert messages[-1].page_number == 1
+    assert messages[-1].role.value == "assistant"
+    assert messages[-1].content == "已修改第 1 页：标题改为红色"
+    assert messages[-1].metadata_json is not None
+    assert messages[-1].metadata_json["change_description"] == "标题改为红色"
+    assert [version.version for version in versions] == [1, 2]
+    assert versions[-1].change_description == "标题改为红色"
+
+
+def test_agent_chat_page_optimizer_uses_page_only_history(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(create_project(settings=local_settings, session_factory=session_factory, with_file=False))
+    asyncio.run(seed_generated_page(session_factory=session_factory, settings=local_settings, project_id=project_id))
+    asyncio.run(
+        seed_page_and_global_history_for_optimizer(
+            session_factory=session_factory,
+            project_id=project_id,
+        )
+    )
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+    fake_model = install_fake_runtime(
+        monkeypatch,
+        responses=[OPTIMIZED_SFC, "标题改为红色"],
+        deliberation_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            f"/api/projects/{project_id}/agent/chat",
+            headers={"x-ppt-studio-api-key": "test-api-key"},
+            json={"message": "把标题改成红色", "page_number": 1},
+        ) as response:
+            _ = "".join(response.iter_text())
+
+    optimizer_prompt = fake_model.calls[0][1][1]
+
+    assert "项目级历史：不要出现在页级上下文" not in optimizer_prompt
+    assert "本页历史：标题保持稳重一点" in optimizer_prompt
+
+
+def test_agent_chat_page_optimizer_loads_recent_ten_rounds_of_page_history(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(create_project(settings=local_settings, session_factory=session_factory, with_file=False))
+    asyncio.run(seed_generated_page(session_factory=session_factory, settings=local_settings, project_id=project_id))
+    asyncio.run(
+        seed_long_page_history_for_optimizer(
+            session_factory=session_factory,
+            project_id=project_id,
+        )
+    )
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+    fake_model = install_fake_runtime(
+        monkeypatch,
+        responses=[OPTIMIZED_SFC, "标题改为红色"],
+        deliberation_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            f"/api/projects/{project_id}/agent/chat",
+            headers={"x-ppt-studio-api-key": "test-api-key"},
+            json={"message": "把标题改成红色", "page_number": 1},
+        ) as response:
+            _ = "".join(response.iter_text())
+
+    optimizer_prompt = fake_model.calls[0][1][1]
+
+    assert "第 1 轮用户消息" not in optimizer_prompt
+    assert "第 2 轮助手回复" not in optimizer_prompt
+    assert "第 3 轮用户消息" in optimizer_prompt
+    assert "第 12 轮助手回复" in optimizer_prompt
+
+
+def test_agent_chat_routes_page_request_without_existing_page_to_boundary_reply(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_id = asyncio.run(create_project(settings=settings, session_factory=session_factory, with_file=False))
+    app = build_test_app(settings=settings, session_factory=session_factory)
+    install_fake_runtime(
+        monkeypatch,
+        responses=["请先切换到预览中的具体页面后再发送修改意见。"],
+        deliberation_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            f"/api/projects/{project_id}/agent/chat",
+            headers={"x-ppt-studio-api-key": "test-api-key"},
+            json={"message": "把标题改成红色"},
+        ) as response:
+            payload = "".join(response.iter_text())
+
+    events = parse_sse_events(payload)
+    assistant_event = next(event for event in events if event["event"] == "assistant_message")
+
+    assert response.status_code == 200
+    assert "具体页面" in assistant_event["data"]["content"]
+    assert "修改意见" in assistant_event["data"]["content"]
+
+
 def parse_sse_events(raw_payload: str) -> list[dict[str, Any]]:
     normalized_payload = raw_payload.replace("\r\n", "\n")
     events: list[dict[str, Any]] = []
@@ -549,6 +741,92 @@ async def load_chat_messages(
             .where(ChatMessage.project_id == project_id)
             .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
         )
+        return list((await session.execute(stmt)).scalars().all())
+
+
+async def seed_generated_page(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    project_id: str,
+) -> None:
+    from app.services import PageService
+
+    async with session_factory() as session:
+        page_service = PageService(session=session, settings=settings)
+        await page_service.upsert_generated_page(
+            project_id=project_id,
+            page_number=1,
+            title="经营亮点",
+            page_type="data",
+            vue_code=VALID_SFC,
+        )
+        page_service.write_preview_slide(page_number=1, vue_code=VALID_SFC)
+
+
+async def seed_page_and_global_history_for_optimizer(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    project_id: str,
+) -> None:
+    from app.services import ChatService
+
+    async with session_factory() as session:
+        chat_service = ChatService(session=session)
+        await chat_service.create_message(
+            project_id=project_id,
+            role="user",
+            content="项目级历史：不要出现在页级上下文",
+            message_type="text",
+        )
+        await chat_service.create_message(
+            project_id=project_id,
+            role="assistant",
+            content="本页历史：标题保持稳重一点",
+            message_type="text",
+            page_number=1,
+        )
+
+
+async def seed_long_page_history_for_optimizer(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    project_id: str,
+) -> None:
+    from app.services import ChatService
+
+    async with session_factory() as session:
+        chat_service = ChatService(session=session)
+        for round_number in range(1, 13):
+            await chat_service.create_message(
+                project_id=project_id,
+                role="user",
+                content=f"第 {round_number} 轮用户消息",
+                message_type="text",
+                page_number=1,
+            )
+            await chat_service.create_message(
+                project_id=project_id,
+                role="assistant",
+                content=f"第 {round_number} 轮助手回复",
+                message_type="text",
+                page_number=1,
+            )
+
+
+async def load_page_versions(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    project_id: str,
+    page_number: int,
+) -> list[PageVersion]:
+    async with session_factory() as session:
+        page = (
+            await session.execute(
+                select(ProjectPage).where(ProjectPage.project_id == project_id, ProjectPage.page_number == page_number)
+            )
+        ).scalar_one()
+        stmt = select(PageVersion).where(PageVersion.page_id == page.id).order_by(PageVersion.version.asc())
         return list((await session.execute(stmt)).scalars().all())
 
 

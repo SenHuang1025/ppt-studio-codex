@@ -41,6 +41,16 @@ let revealTimer: number | null = null
 const messageTime = computed<string>(() => formatMessageTime(props.item.createdAt))
 const assistantHtml = computed<string>(() => markdown.render(displayedAssistantContent.value))
 const assistantLeadLabel = computed<string>(() => (props.item.type === 'assistant_message' ? 'Agent 回复' : ''))
+const userLeadLabel = computed<string>(() =>
+  props.item.type === 'user_message' && props.item.pageNumber
+    ? `优化第 ${props.item.pageNumber} 页`
+    : '你的需求'
+)
+const assistantScopeLabel = computed<string | null>(() =>
+  props.item.type === 'assistant_message' && props.item.pageNumber
+    ? `优化第 ${props.item.pageNumber} 页`
+    : null
+)
 const outlinePreviewPages = computed(() =>
   props.item.type === 'outline_message' ? props.item.outline?.pages.slice(0, 4) ?? [] : []
 )
@@ -298,7 +308,15 @@ function formatMessageTime(value: string): string {
 <template>
   <article v-if="item.type === 'user_message'" class="ml-auto max-w-[86%]">
     <div class="rounded-[var(--radius-xl)] border border-[rgba(241,143,1,0.18)] bg-[rgba(255,243,226,0.92)] px-4 py-3 shadow-[var(--shadow-glass-1)]">
-      <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--accent-200)]">你的需求</div>
+      <div class="flex items-center justify-between gap-3">
+        <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--accent-200)]">{{ userLeadLabel }}</div>
+        <span
+          v-if="item.pageNumber"
+          class="rounded-full border border-[rgba(241,143,1,0.18)] bg-[rgba(255,249,239,0.72)] px-2.5 py-1 text-[10px] text-[color:var(--accent-200)]"
+        >
+          项目级同步
+        </span>
+      </div>
       <div class="mt-2 whitespace-pre-wrap text-sm leading-7 text-[color:var(--app-text-primary)]">
         {{ item.content }}
       </div>
@@ -308,8 +326,16 @@ function formatMessageTime(value: string): string {
 
   <article v-else-if="item.type === 'assistant_message'" class="max-w-[92%]">
     <div class="rounded-[var(--radius-xl)] border border-[rgba(104,166,125,0.14)] bg-[rgba(255,249,239,0.88)] px-4 py-3 shadow-[var(--shadow-glass-1)]">
-      <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--app-text-tertiary)]">
-        {{ assistantLeadLabel }}
+      <div class="flex items-center justify-between gap-3">
+        <div class="mono-meta text-[10px] uppercase tracking-[0.16em] text-[color:var(--app-text-tertiary)]">
+          {{ assistantLeadLabel }}
+        </div>
+        <span
+          v-if="assistantScopeLabel"
+          class="rounded-full border border-[rgba(104,166,125,0.16)] bg-[rgba(245,252,247,0.88)] px-2.5 py-1 text-[10px] text-[color:var(--primary-300)]"
+        >
+          {{ assistantScopeLabel }}
+        </span>
       </div>
       <div
         v-if="item.contentFormat === 'markdown'"

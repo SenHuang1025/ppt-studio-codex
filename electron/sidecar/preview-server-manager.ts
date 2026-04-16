@@ -45,7 +45,8 @@ export class PreviewServerManager {
     this.usingExistingService = false
 
     this.startPromise = new Promise<void>((resolve, reject) => {
-      const child = spawn(this.resolvePnpmCommand(), ['dev'], {
+      const previewCommand = this.resolvePreviewCommand()
+      const child = spawn(previewCommand.command, previewCommand.args, {
         cwd: previewDirectory,
         env: {
           ...process.env
@@ -313,8 +314,18 @@ export class PreviewServerManager {
     return path.join(app.getAppPath(), 'ppt-preview-server')
   }
 
-  private resolvePnpmCommand(): string {
-    return process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+  private resolvePreviewCommand(): { command: string; args: string[] } {
+    if (process.platform === 'win32') {
+      return {
+        command: process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe',
+        args: ['/d', '/s', '/c', 'pnpm dev']
+      }
+    }
+
+    return {
+      command: 'pnpm',
+      args: ['dev']
+    }
   }
 
   private log(level: 'info' | 'warn' | 'error', message: string): void {

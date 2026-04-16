@@ -26,7 +26,7 @@ class ChatStorageError(ChatServiceError):
 
 
 class ChatService:
-    DEFAULT_AGENT_HISTORY_LIMIT = 20
+    DEFAULT_AGENT_HISTORY_LIMIT = 10
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -72,6 +72,7 @@ class ChatService:
         project_id: str,
         *,
         page_number: int | None = None,
+        include_page_messages: bool = False,
         limit: int | None = None,
         include_global_for_page: bool = False,
         exclude_message_id: str | None = None,
@@ -85,6 +86,7 @@ class ChatService:
         filters = self._build_filters(
             project_id=project_id,
             page_number=page_number,
+            include_page_messages=include_page_messages,
             include_global_for_page=include_global_for_page,
             exclude_message_id=exclude_message_id,
         )
@@ -111,15 +113,39 @@ class ChatService:
         page_number: int | None = None,
         limit: int = DEFAULT_AGENT_HISTORY_LIMIT,
         exclude_message_id: str | None = None,
+        include_global_for_page: bool = False,
     ) -> list[dict[str, Any]]:
         messages, _ = await self.list_messages(
             project_id,
             page_number=page_number,
             limit=limit,
-            include_global_for_page=page_number is not None,
+            include_global_for_page=include_global_for_page,
             exclude_message_id=exclude_message_id,
         )
         return [self._serialize_agent_history_message(message) for message in messages]
+
+    async def count_messages_by_page(self, project_id: str) -> dict[int, int]:
+        await self._ensure_project_exists(project_id)
+
+        stmt = (
+            select(ChatMessage.page_number, func.count(ChatMessage.id))
+            .where(
+                ChatMessage.project_id == project_id,
+                ChatMessage.page_number.is_not(None),
+            )
+            .group_by(ChatMessage.page_number)
+        )
+
+        try:
+            rows = (await self.session.execute(stmt)).all()
+        except SQLAlchemyError as exc:
+            raise ChatStorageError(f"Failed to count chat messages for project '{project_id}'.") from exc
+
+        counts: dict[int, int] = {}
+        for page_number, count in rows:
+            if isinstance(page_number, int):
+                counts[page_number] = int(count or 0)
+        return counts
 
     async def _ensure_project_exists(self, project_id: str) -> None:
         stmt = select(Project.id).where(Project.id == project_id)
@@ -132,16 +158,17 @@ class ChatService:
         *,
         project_id: str,
         page_number: int | None,
+        include_page_messages: bool,
         include_global_for_page: bool,
         exclude_message_id: str | None,
     ) -> list[Any]:
         filters: list[Any] = [ChatMessage.project_id == project_id]
 
-        if page_number is None:
+        if page_number is None and not include_page_messages:
             filters.append(ChatMessage.page_number.is_(None))
         elif include_global_for_page:
             filters.append(or_(ChatMessage.page_number == page_number, ChatMessage.page_number.is_(None)))
-        else:
+        elif page_number is not None:
             filters.append(ChatMessage.page_number == page_number)
 
         if exclude_message_id:

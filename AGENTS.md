@@ -150,6 +150,6 @@ cd python-backend && uv run ruff check .
 ```
 
 ## 当前开发阶段
-Phase 1 - 基础骨架搭建
+Phase 5 - 打磨与收尾
 
-详见 `docs/development-phases/phase-1-foundation.md`
+详见 `docs/development-phases/phase-5-polish.md`

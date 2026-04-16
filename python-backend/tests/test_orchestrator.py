@@ -76,6 +76,13 @@ def build_state(
         existing_outline=existing_outline,
         post_analyze_route=None,
         draft_outline=None,
+        pages={},
+        global_theme=None,
+        generated_page=None,
+        generation_target_page=None,
+        draft_page_code=None,
+        optimized_page=None,
+        draft_optimized_page_code=None,
         persistable_assistant_message=None,
     )
 

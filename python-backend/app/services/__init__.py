@@ -10,7 +10,16 @@ from app.services.file_service import (
     UnsupportedFileTypeError,
     UploadedFileNotFoundError,
 )
-from app.services.page_service import PageService, PageServiceError, PageStorageError, PreviewSlideWriteError
+from app.services.page_service import (
+    InvalidPageOrderError,
+    PageNotFoundError,
+    PageMutationValidationError,
+    PageService,
+    PageServiceError,
+    PageStorageError,
+    PageVersionNotFoundError,
+    PreviewSlideWriteError,
+)
 from app.services.project_service import (
     ProjectNotFoundError,
     ProjectService,
@@ -32,9 +41,13 @@ __all__ = [
     "FileStorageError",
     "FileTooLargeError",
     "FileValidationError",
+    "InvalidPageOrderError",
     "PageService",
     "PageServiceError",
+    "PageMutationValidationError",
+    "PageNotFoundError",
     "PageStorageError",
+    "PageVersionNotFoundError",
     "PreviewSlideWriteError",
     "ProjectNotFoundError",
     "ProjectService",

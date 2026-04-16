@@ -19,8 +19,8 @@ from app.api.pages import router as pages_router
 from app.api.projects import router as projects_router
 from app.config import Settings, get_settings
 from app.db import get_db_session
-from app.models import ProjectPage, UploadedFile
-from app.models.enums import FileParseStatus
+from app.models import PageVersion, ProjectPage, UploadedFile
+from app.models.enums import FileParseStatus, PageStatus
 from app.schemas import (
     AppTheme,
     LLMProvider,
@@ -95,6 +95,300 @@ def test_generate_single_page_returns_400_when_api_key_missing(
     assert response.json()["detail"] == "请先在设置页配置 API Key。"
 
 
+def test_confirm_page_updates_status_to_confirmed(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(
+        create_project_with_outline_and_file(
+            settings=local_settings,
+            session_factory=session_factory,
+            with_outline=True,
+        )
+    )
+    asyncio.run(
+        seed_generated_page(
+            session_factory=session_factory,
+            project_id=project_id,
+            page_number=2,
+            title="经营亮点",
+        )
+    )
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/projects/{project_id}/pages/2/confirm")
+
+    payload = response.json()
+    persisted_page = asyncio.run(load_generated_page(session_factory=session_factory, project_id=project_id, page_number=2))
+
+    assert response.status_code == 200
+    assert payload["page_number"] == 2
+    assert payload["status"] == "confirmed"
+    assert persisted_page is not None
+    assert persisted_page.status == PageStatus.CONFIRMED
+
+
+def test_list_page_versions_returns_versions_for_page(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(
+        create_project_with_outline_and_file(
+            settings=local_settings,
+            session_factory=session_factory,
+            with_outline=True,
+        )
+    )
+    asyncio.run(
+        seed_generated_page(
+            session_factory=session_factory,
+            project_id=project_id,
+            page_number=2,
+            title="经营亮点",
+        )
+    )
+    asyncio.run(
+        optimize_seed_page(
+            session_factory=session_factory,
+            settings=local_settings,
+            project_id=project_id,
+            page_number=2,
+        )
+    )
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/projects/{project_id}/pages/2/versions")
+
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert [item["version"] for item in payload] == [2, 1]
+    assert payload[0]["change_description"] == "标题改为红色"
+
+
+def test_rollback_page_restores_target_code_and_updates_preview_file(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(
+        create_project_with_outline_and_file(
+            settings=local_settings,
+            session_factory=session_factory,
+            with_outline=True,
+        )
+    )
+    asyncio.run(
+        seed_generated_page(
+            session_factory=session_factory,
+            project_id=project_id,
+            page_number=2,
+            title="经营亮点",
+        )
+    )
+    asyncio.run(
+        optimize_seed_page(
+            session_factory=session_factory,
+            settings=local_settings,
+            project_id=project_id,
+            page_number=2,
+        )
+    )
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/projects/{project_id}/pages/2/rollback",
+            json={"version": 1},
+        )
+
+    payload = response.json()
+    persisted_page = asyncio.run(load_generated_page(session_factory=session_factory, project_id=project_id, page_number=2))
+    versions = asyncio.run(load_page_versions(session_factory=session_factory, project_id=project_id, page_number=2))
+    preview_file = Path(local_settings.preview_slides_dir_path / "page-2.vue").resolve()
+
+    assert response.status_code == 200
+    assert payload["page_number"] == 2
+    assert payload["version"] == 3
+    assert persisted_page is not None
+    assert persisted_page.version == 3
+    assert persisted_page.vue_code == VALID_SFC
+    assert [version.version for version in versions] == [1, 2, 3]
+    assert versions[-1].change_description == "回滚到 v1"
+    assert preview_file.read_text(encoding="utf-8") == VALID_SFC
+
+
+def test_preview_page_version_writes_temporary_preview_file(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(
+        create_project_with_outline_and_file(
+            settings=local_settings,
+            session_factory=session_factory,
+            with_outline=True,
+        )
+    )
+    asyncio.run(
+        seed_generated_page(
+            session_factory=session_factory,
+            project_id=project_id,
+            page_number=2,
+            title="经营亮点",
+        )
+    )
+    asyncio.run(
+        optimize_seed_page(
+            session_factory=session_factory,
+            settings=local_settings,
+            project_id=project_id,
+            page_number=2,
+        )
+    )
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/projects/{project_id}/pages/2/versions/1/preview")
+
+    payload = response.json()
+    preview_file = Path(local_settings.preview_slides_dir_path / "version-preview.vue").resolve()
+
+    assert response.status_code == 200
+    assert payload["version"] == 1
+    assert preview_file.read_text(encoding="utf-8") == VALID_SFC
+
+
+def test_delete_page_endpoint_removes_page_and_reindexes(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(
+        create_project_with_outline_and_file(
+            settings=local_settings,
+            session_factory=session_factory,
+            with_outline=True,
+        )
+    )
+    asyncio.run(seed_all_generated_pages(session_factory=session_factory, settings=local_settings, project_id=project_id))
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+
+    with TestClient(app) as client:
+        response = client.delete(f"/api/projects/{project_id}/pages/2")
+        project_response = client.get(f"/api/projects/{project_id}")
+
+    payload = project_response.json()
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert [page["page_number"] for page in payload["pages"]] == [1, 2]
+    assert [page["title"] for page in payload["pages"]] == ["封面", "下一步计划"]
+    assert payload["outline"]["total_pages"] == 2
+    assert [page["page_number"] for page in payload["outline"]["pages"]] == [1, 2]
+    assert not (local_settings.preview_slides_dir_path / "page-3.vue").exists()
+
+
+def test_duplicate_page_endpoint_inserts_copy_after_current_page(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(
+        create_project_with_outline_and_file(
+            settings=local_settings,
+            session_factory=session_factory,
+            with_outline=True,
+        )
+    )
+    asyncio.run(seed_all_generated_pages(session_factory=session_factory, settings=local_settings, project_id=project_id))
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/projects/{project_id}/pages/2/duplicate")
+        project_response = client.get(f"/api/projects/{project_id}")
+
+    payload = project_response.json()
+
+    assert response.status_code == 200
+    assert response.json()["page_number"] == 3
+    assert [page["page_number"] for page in payload["pages"]] == [1, 2, 3, 4]
+    assert [page["title"] for page in payload["pages"]] == ["封面", "经营亮点", "经营亮点", "下一步计划"]
+    assert payload["outline"]["total_pages"] == 4
+    assert (local_settings.preview_slides_dir_path / "page-3.vue").read_text(encoding="utf-8") == VALID_SFC
+
+
+def test_reorder_pages_endpoint_updates_page_numbers_outline_and_preview_files(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(
+        create_project_with_outline_and_file(
+            settings=local_settings,
+            session_factory=session_factory,
+            with_outline=True,
+        )
+    )
+    asyncio.run(seed_all_generated_pages(session_factory=session_factory, settings=local_settings, project_id=project_id))
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+
+    with TestClient(app) as client:
+        response = client.put(f"/api/projects/{project_id}/pages/reorder", json={"page_numbers": [3, 1, 2]})
+        project_response = client.get(f"/api/projects/{project_id}")
+
+    payload = project_response.json()
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert [page["page_number"] for page in payload["pages"]] == [1, 2, 3]
+    assert [page["title"] for page in payload["pages"]] == ["下一步计划", "封面", "经营亮点"]
+    assert [page["title"] for page in payload["outline"]["pages"]] == ["下一步计划", "封面", "经营亮点"]
+    assert (local_settings.preview_slides_dir_path / "page-1.vue").read_text(encoding="utf-8") == VALID_SFC.replace("经营亮点", "下一步计划")
+
+
+def test_insert_page_after_endpoint_generates_new_page_and_reindexes(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(
+        create_project_with_outline_and_file(
+            settings=local_settings,
+            session_factory=session_factory,
+            with_outline=True,
+        )
+    )
+    asyncio.run(seed_all_generated_pages(session_factory=session_factory, settings=local_settings, project_id=project_id))
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+    generated_insert_code = VALID_SFC.replace("经营亮点", "新增增长机会")
+    install_fake_runtime(monkeypatch, responses=[generated_insert_code], deliberation_enabled=False)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/projects/{project_id}/pages/2/insert-after",
+            headers={"x-ppt-studio-api-key": "test-api-key"},
+            json={"description": "新增一页说明 Q2 增长机会和行动抓手"},
+        )
+        project_response = client.get(f"/api/projects/{project_id}")
+
+    payload = project_response.json()
+
+    assert response.status_code == 200
+    assert response.json()["page_number"] == 3
+    assert response.json()["title"] == "新增一页说明 Q2 增长机会和行动抓手"
+    assert [page["page_number"] for page in payload["pages"]] == [1, 2, 3, 4]
+    assert payload["outline"]["total_pages"] == 4
+    assert [page["page_number"] for page in payload["outline"]["pages"]] == [1, 2, 3, 4]
+    assert payload["outline"]["pages"][2]["content_brief"] == "新增一页说明 Q2 增长机会和行动抓手"
+    assert (local_settings.preview_slides_dir_path / "page-3.vue").read_text(encoding="utf-8") == generated_insert_code
+
+
 def test_generate_single_page_streams_events_persists_code_and_writes_preview(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
@@ -133,6 +427,39 @@ def test_generate_single_page_streams_events_persists_code_and_writes_preview(
     assert persisted_page.title == "经营亮点"
     assert persisted_page.vue_code == VALID_SFC
     assert preview_file.read_text(encoding="utf-8") == VALID_SFC
+
+
+def test_regenerate_single_page_route_keeps_generate_behavior(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_settings = build_local_settings(settings)
+    project_id = asyncio.run(
+        create_project_with_outline_and_file(
+            settings=local_settings,
+            session_factory=session_factory,
+            with_outline=True,
+        )
+    )
+    app = build_test_app(settings=local_settings, session_factory=session_factory)
+    install_fake_runtime(monkeypatch, responses=[VALID_SFC], deliberation_enabled=False)
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            f"/api/projects/{project_id}/pages/2/regenerate",
+            headers={"x-ppt-studio-api-key": "test-api-key"},
+        ) as response:
+            payload = "".join(response.iter_text())
+
+    events = parse_sse_events(payload)
+    event_names = [event["event"] for event in events]
+
+    assert response.status_code == 200
+    assert "page_generating" in event_names
+    assert "page_complete" in event_names
+    assert event_names[-1] == "done"
 
 
 def test_generate_single_page_streams_error_for_invalid_page_number(
@@ -365,3 +692,99 @@ async def load_generated_page(
                 select(ProjectPage).where(ProjectPage.project_id == project_id, ProjectPage.page_number == page_number)
             )
         ).scalar_one_or_none()
+
+
+async def seed_generated_page(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    project_id: str,
+    page_number: int,
+    title: str,
+) -> ProjectPage:
+    async with session_factory() as session:
+        page = ProjectPage(
+            project_id=project_id,
+            page_number=page_number,
+            title=title,
+            page_type="content",
+            vue_code=VALID_SFC,
+            status=PageStatus.GENERATED,
+            version=1,
+        )
+        session.add(page)
+        await session.commit()
+        await session.refresh(page)
+        session.add(
+            PageVersion(
+                page_id=page.id,
+                version=1,
+                vue_code=VALID_SFC,
+                change_description="Generated by page generator.",
+            )
+        )
+        await session.commit()
+        await session.refresh(page)
+        return page
+
+
+async def optimize_seed_page(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    project_id: str,
+    page_number: int,
+) -> None:
+    from app.services import PageService
+
+    async with session_factory() as session:
+        page_service = PageService(session=session, settings=settings)
+        await page_service.optimize_existing_page(
+            project_id=project_id,
+            page_number=page_number,
+            vue_code=VALID_SFC.replace("经营亮点", "经营亮点（优化）"),
+            change_description="标题改为红色",
+        )
+        page_service.write_preview_slide(
+            page_number=page_number,
+            vue_code=VALID_SFC.replace("经营亮点", "经营亮点（优化）"),
+        )
+
+
+async def seed_all_generated_pages(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    project_id: str,
+) -> None:
+    async with session_factory() as session:
+        page_service = pages_api.PageService(session=session, settings=settings)
+        pages = [
+            (1, "封面", VALID_SFC.replace("经营亮点", "封面")),
+            (2, "经营亮点", VALID_SFC),
+            (3, "下一步计划", VALID_SFC.replace("经营亮点", "下一步计划")),
+        ]
+        for page_number, title, vue_code in pages:
+            await page_service.upsert_generated_page(
+                project_id=project_id,
+                page_number=page_number,
+                title=title,
+                page_type="content",
+                vue_code=vue_code,
+            )
+            page_service.write_preview_slide(page_number=page_number, vue_code=vue_code)
+
+
+async def load_page_versions(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    project_id: str,
+    page_number: int,
+) -> list[PageVersion]:
+    async with session_factory() as session:
+        page = (
+            await session.execute(
+                select(ProjectPage).where(ProjectPage.project_id == project_id, ProjectPage.page_number == page_number)
+            )
+        ).scalar_one()
+        stmt = select(PageVersion).where(PageVersion.page_id == page.id).order_by(PageVersion.version.asc())
+        return list((await session.execute(stmt)).scalars().all())

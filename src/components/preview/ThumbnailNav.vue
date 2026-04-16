@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, watch, type ComponentPublicInstance } from 'vue'
+import { computed, nextTick, ref, watch, type ComponentPublicInstance } from 'vue'
 import ThumbnailItem from './ThumbnailItem.vue'
 import type { PreviewPageItem, WorkspaceGenerationProgressState } from '@/types/preview'
 
@@ -10,12 +10,19 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  deletePage: [pageNumber: number]
+  duplicatePage: [pageNumber: number]
+  insertPageAfter: [pageNumber: number]
+  openVersionHistory: [pageNumber: number]
+  reorderPages: [pageNumbers: number[]]
   selectPage: [pageNumber: number]
 }>()
 
 const itemElementMap = new Map<number, HTMLElement>()
 const generatedCount = computed<number>(() => props.generationProgress.generatedCount)
 const generatingCount = computed<number>(() => props.generationProgress.generatingCount)
+const draggingPageNumber = ref<number | null>(null)
+const dragOverPageNumber = ref<number | null>(null)
 
 watch(
   [() => props.currentPageNumber, () => props.items.length],
@@ -47,6 +54,65 @@ async function scrollCurrentItemIntoView(): Promise<void> {
     block: 'nearest'
   })
 }
+
+function handleDragStart(event: DragEvent, pageNumber: number): void {
+  if (event.target instanceof HTMLElement && event.target.closest('[data-thumbnail-drag-ignore="true"]')) {
+    event.preventDefault()
+    return
+  }
+
+  draggingPageNumber.value = pageNumber
+  dragOverPageNumber.value = null
+  event.dataTransfer?.setData('text/plain', String(pageNumber))
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+  }
+}
+
+function handleDragOver(event: DragEvent, pageNumber: number): void {
+  if (draggingPageNumber.value === null || draggingPageNumber.value === pageNumber) {
+    return
+  }
+
+  event.preventDefault()
+  dragOverPageNumber.value = pageNumber
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move'
+  }
+}
+
+function handleDrop(event: DragEvent, targetPageNumber: number): void {
+  event.preventDefault()
+  const sourcePageNumber = resolveDraggedPageNumber(event)
+  clearDragState()
+
+  if (sourcePageNumber === null || sourcePageNumber === targetPageNumber) {
+    return
+  }
+
+  const orderedPageNumbers = props.items.map((item) => item.pageNumber)
+  const sourceIndex = orderedPageNumbers.indexOf(sourcePageNumber)
+  const targetIndex = orderedPageNumbers.indexOf(targetPageNumber)
+
+  if (sourceIndex < 0 || targetIndex < 0) {
+    return
+  }
+
+  const [movedPageNumber] = orderedPageNumbers.splice(sourceIndex, 1)
+  orderedPageNumbers.splice(targetIndex, 0, movedPageNumber)
+  emit('reorderPages', orderedPageNumbers)
+}
+
+function clearDragState(): void {
+  draggingPageNumber.value = null
+  dragOverPageNumber.value = null
+}
+
+function resolveDraggedPageNumber(event: DragEvent): number | null {
+  const rawValue = event.dataTransfer?.getData('text/plain') || String(draggingPageNumber.value ?? '')
+  const parsed = Number.parseInt(rawValue, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
 </script>
 
 <template>
@@ -76,11 +142,25 @@ async function scrollCurrentItemIntoView(): Promise<void> {
         v-for="item in items"
         :key="item.pageNumber"
         :ref="(element) => registerItemElement(item.pageNumber, element)"
+        draggable="true"
+        class="rounded-[var(--radius-xl)] transition duration-200"
+        :class="dragOverPageNumber === item.pageNumber
+          ? 'translate-y-0.5 ring-2 ring-[rgba(104,166,125,0.42)]'
+          : ''"
+        @dragenter="handleDragOver($event, item.pageNumber)"
+        @dragend="clearDragState"
+        @dragover="handleDragOver($event, item.pageNumber)"
+        @dragstart="handleDragStart($event, item.pageNumber)"
+        @drop="handleDrop($event, item.pageNumber)"
       >
         <ThumbnailItem
           :current-generating-page-number="generationProgress.currentGeneratingPageNumber"
           :item="item"
           :selected="currentPageNumber === item.pageNumber"
+          @delete-page="emit('deletePage', $event)"
+          @duplicate-page="emit('duplicatePage', $event)"
+          @insert-page-after="emit('insertPageAfter', $event)"
+          @open-version-history="emit('openVersionHistory', $event)"
           @select="emit('selectPage', $event)"
         />
       </div>

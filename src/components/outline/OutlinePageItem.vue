@@ -5,10 +5,12 @@ import type { OutlinePage } from '@/types/project'
 defineProps<{
   active?: boolean
   expanded?: boolean
+  previewLinkEnabled?: boolean
   page: OutlinePage
 }>()
 
 defineEmits<{
+  preview: [pageNumber: number]
   toggle: [pageNumber: number]
 }>()
 </script>
@@ -39,6 +41,14 @@ defineEmits<{
         <NTag round :bordered="false" class="border border-[color:var(--app-border-subtle)] bg-[rgba(255,249,239,0.82)] text-[color:var(--app-text-secondary)]">
           {{ page.type }}
         </NTag>
+        <button
+          v-if="previewLinkEnabled"
+          class="text-xs text-[color:var(--primary-300)] transition hover:text-[color:var(--accent-200)]"
+          type="button"
+          @click.stop="$emit('preview', page.page_number)"
+        >
+          查看预览
+        </button>
         <span class="text-xs text-[color:var(--app-text-tertiary)]">{{ expanded ? '收起详情' : '展开详情' }}</span>
       </div>
     </button>

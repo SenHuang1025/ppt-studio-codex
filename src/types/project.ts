@@ -32,6 +32,7 @@ export interface Outline {
 }
 
 export interface ProjectPage {
+  chat_message_count: number
   created_at: string
   id: string
   page_number: number
@@ -42,6 +43,27 @@ export interface ProjectPage {
   updated_at: string
   version: number
   vue_code: string | null
+}
+
+export interface PageVersion {
+  change_description: string | null
+  created_at: string
+  id: string
+  page_id: string
+  version: number
+  vue_code: string
+}
+
+export interface PageInsertAfterPayload {
+  description: string
+}
+
+export interface PageMutationResponse {
+  success: boolean
+}
+
+export interface PageReorderPayload {
+  page_numbers: number[]
 }
 
 export interface Project {

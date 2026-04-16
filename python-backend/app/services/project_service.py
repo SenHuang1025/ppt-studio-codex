@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import Settings
-from app.models import Project
+from app.models import ChatMessage, Project
 from app.schemas import OutlineSchema, ProjectCreate, ProjectStatus, ProjectUpdate, ThemeConfig
 
 
@@ -97,7 +97,11 @@ class ProjectService:
         return project
 
     async def get_project_detail(self, project_id: str) -> Project:
-        return await self._get_project_or_raise(project_id, include_pages=True)
+        project = await self._get_project_or_raise(project_id, include_pages=True)
+        page_message_counts = await self._count_page_messages(project_id)
+        for page in getattr(project, "pages", []) or []:
+            setattr(page, "chat_message_count", int(page_message_counts.get(int(page.page_number), 0)))
+        return project
 
     async def update_project(self, project_id: str, payload: ProjectUpdate) -> Project:
         project = await self._get_project_or_raise(project_id)
@@ -186,6 +190,23 @@ class ProjectService:
         if project is None:
             raise ProjectNotFoundError(project_id)
         return project
+
+    async def _count_page_messages(self, project_id: str) -> dict[int, int]:
+        stmt = (
+            select(ChatMessage.page_number, func.count(ChatMessage.id))
+            .where(
+                ChatMessage.project_id == project_id,
+                ChatMessage.page_number.is_not(None),
+            )
+            .group_by(ChatMessage.page_number)
+        )
+
+        rows = (await self.session.execute(stmt)).all()
+        counts: dict[int, int] = {}
+        for page_number, count in rows:
+            if isinstance(page_number, int):
+                counts[page_number] = int(count or 0)
+        return counts
 
     def _build_order_by(self, *, sort: str | None, order: str | None) -> list:
         sort_key = (sort or self.DEFAULT_SORT).strip().lower()

@@ -1,12 +1,16 @@
 import type { OutlinePage, ProjectPage } from './project'
 
-export const PREVIEW_PAGE_STATUS_VALUES = ['generated', 'generating', 'pending'] as const
+export const PREVIEW_PAGE_STATUS_VALUES = ['generated', 'confirmed', 'generating', 'pending'] as const
 
 export type PreviewPageStatus = (typeof PREVIEW_PAGE_STATUS_VALUES)[number]
 
 export const PAGE_GENERATION_STAGE_VALUES = ['draft', 'critic', 'synthesis'] as const
 
 export type PageGenerationStage = (typeof PAGE_GENERATION_STAGE_VALUES)[number]
+
+export const PREVIEW_RENDER_TARGET_KIND_VALUES = ['live', 'version'] as const
+
+export type PreviewRenderTargetKind = (typeof PREVIEW_RENDER_TARGET_KIND_VALUES)[number]
 
 export const SLIDE_RENDERER_STATE_VALUES = ['idle', 'loading', 'ready', 'error'] as const
 
@@ -47,6 +51,7 @@ export interface WorkspaceGenerationProgressState {
 }
 
 export interface PreviewPageItem {
+  chatMessageCount: number
   contentBrief: string | null
   generatedPage: ProjectPage | null
   hasGeneratedCode: boolean
@@ -58,4 +63,34 @@ export interface PreviewPageItem {
   title: string
   updatedAt: string | null
   version: number | null
+}
+
+export interface IframeScrollSnapshotElement {
+  left: number
+  path: string
+  top: number
+}
+
+export interface IframeScrollSnapshot {
+  elements: IframeScrollSnapshotElement[]
+  window: {
+    left: number
+    top: number
+  }
+}
+
+export interface PreviewRefreshRequest {
+  pageNumber: number
+  reason: 'page_complete' | 'page_updated'
+  sequence: number
+  version: number | null
+}
+
+export interface PreviewVersionSelection {
+  changeDescription: string | null
+  createdAt: string
+  pageNumber: number
+  previewToken: number
+  sourceVersion: number
+  vueCode: string
 }

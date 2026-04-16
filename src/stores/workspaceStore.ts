@@ -30,6 +30,10 @@ interface LoadChatMessagesOptions extends ChatMessageListOptions {
   force?: boolean
 }
 
+interface LoadPageChatMessagesOptions {
+  force?: boolean
+}
+
 interface LoadThemePresetsOptions {
   force?: boolean
 }
@@ -61,6 +65,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const chatMessagesLoading = ref(false)
   const chatMessagesLoaded = ref(false)
   const chatMessagesError = ref<string | null>(null)
+  const previewProjectChatExpanded = ref(false)
+  const pageChatMessages = ref<Record<number, ChatMessage[]>>({})
+  const pageChatMessagesLoading = ref<Record<number, boolean>>({})
+  const pageChatMessagesLoaded = ref<Record<number, boolean>>({})
+  const pageChatMessagesError = ref<Record<number, string | null>>({})
   const themePresets = ref<ThemeConfig[]>([])
   const themePresetsLoading = ref(false)
   const themePresetsLoaded = ref(false)
@@ -87,6 +96,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   let lastFilesLoadToken = 0
   let lastChatMessagesLoadToken = 0
   let lastChatMessagesOptions: ChatMessageListOptions = {}
+  let lastPageChatMessagesLoadTokens: Record<number, number> = {}
   let lastPreviewThemeSyncKey: string | null = null
 
   async function initializeWorkspace(payload: InitializeWorkspacePayload): Promise<void> {
@@ -101,6 +111,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       project.value = null
       projectLoaded.value = false
       projectError.value = null
+      previewProjectChatExpanded.value = false
       previewThemeSyncError.value = null
       themeApplyingId.value = null
       lastPreviewThemeSyncKey = null
@@ -115,6 +126,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       force: projectChanged || !filesLoaded.value
     })
     await loadChatMessages(normalizedProjectId, {
+      includePageMessages: true,
       force: projectChanged || !chatMessagesLoaded.value
     })
 
@@ -176,6 +188,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     currentMode.value = mode
   }
 
+  function setPreviewProjectChatExpanded(expanded: boolean): void {
+    previewProjectChatExpanded.value = expanded
+  }
+
   function setPreviewPage(pageNumber: number): void {
     const normalizedPage = Number.isFinite(pageNumber) ? Math.max(1, Math.floor(pageNumber)) : 1
     currentPreviewPage.value = normalizedPage
@@ -232,6 +248,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     await loadProject(projectId, { force: true })
     await loadFiles(projectId, { force: true })
     await loadChatMessages(projectId, { ...lastChatMessagesOptions, force: true })
+    if (pageChatMessagesLoaded.value[currentPreviewPage.value]) {
+      await loadPageChatMessages(projectId, currentPreviewPage.value, { force: true }).catch(() => undefined)
+    }
 
     if (currentMode.value === 'preview') {
       await Promise.all([
@@ -302,6 +321,87 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       ...lastChatMessagesOptions,
       force: true
     })
+  }
+
+  async function loadPageChatMessages(
+    projectId: string,
+    pageNumber: number,
+    options?: LoadPageChatMessagesOptions
+  ): Promise<ChatMessage[]> {
+    const normalizedProjectId = projectId.trim()
+    const normalizedPageNumber = normalizePageNumber(pageNumber)
+
+    if (!normalizedProjectId || normalizedPageNumber === null) {
+      return []
+    }
+
+    if (!options?.force && pageChatMessagesLoaded.value[normalizedPageNumber]) {
+      return pageChatMessages.value[normalizedPageNumber] ?? []
+    }
+
+    const requestToken = (lastPageChatMessagesLoadTokens[normalizedPageNumber] ?? 0) + 1
+    lastPageChatMessagesLoadTokens = {
+      ...lastPageChatMessagesLoadTokens,
+      [normalizedPageNumber]: requestToken
+    }
+    pageChatMessagesLoading.value = {
+      ...pageChatMessagesLoading.value,
+      [normalizedPageNumber]: true
+    }
+    pageChatMessagesError.value = {
+      ...pageChatMessagesError.value,
+      [normalizedPageNumber]: null
+    }
+
+    try {
+      const response = await chatService.list(normalizedProjectId, {
+        includeGlobal: false,
+        pageNumber: normalizedPageNumber
+      })
+
+      if (lastPageChatMessagesLoadTokens[normalizedPageNumber] !== requestToken) {
+        return response.messages
+      }
+
+      pageChatMessages.value = {
+        ...pageChatMessages.value,
+        [normalizedPageNumber]: sortChatMessages(response.messages)
+      }
+      pageChatMessagesLoaded.value = {
+        ...pageChatMessagesLoaded.value,
+        [normalizedPageNumber]: true
+      }
+      return pageChatMessages.value[normalizedPageNumber] ?? []
+    } catch (error: unknown) {
+      if (lastPageChatMessagesLoadTokens[normalizedPageNumber] === requestToken) {
+        pageChatMessages.value = {
+          ...pageChatMessages.value,
+          [normalizedPageNumber]: []
+        }
+        pageChatMessagesLoaded.value = {
+          ...pageChatMessagesLoaded.value,
+          [normalizedPageNumber]: false
+        }
+        pageChatMessagesError.value = {
+          ...pageChatMessagesError.value,
+          [normalizedPageNumber]: normalizeWorkspaceError(error)
+        }
+      }
+
+      throw error
+    } finally {
+      if (lastPageChatMessagesLoadTokens[normalizedPageNumber] === requestToken) {
+        pageChatMessagesLoading.value = {
+          ...pageChatMessagesLoading.value,
+          [normalizedPageNumber]: false
+        }
+      }
+    }
+  }
+
+  async function refreshPageChatMessages(pageNumber: number): Promise<void> {
+    const projectId = requireCurrentProjectId()
+    await loadPageChatMessages(projectId, pageNumber, { force: true })
   }
 
   async function loadThemePresets(options?: LoadThemePresetsOptions): Promise<ThemeConfig[]> {
@@ -462,6 +562,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     projectLoading.value = false
     projectLoaded.value = false
     projectError.value = null
+    previewProjectChatExpanded.value = false
     previewThemeSyncing.value = false
     previewThemeSyncError.value = null
     themeApplyingId.value = null
@@ -506,7 +607,16 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     chatMessagesLoading.value = false
     chatMessagesLoaded.value = false
     chatMessagesError.value = null
+    resetPageChatMessageState()
     lastChatMessagesOptions = {}
+  }
+
+  function resetPageChatMessageState(): void {
+    pageChatMessages.value = {}
+    pageChatMessagesLoading.value = {}
+    pageChatMessagesLoaded.value = {}
+    pageChatMessagesError.value = {}
+    lastPageChatMessagesLoadTokens = {}
   }
 
   function requireCurrentProjectId(): string {
@@ -532,6 +642,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     currentMode,
     currentPreviewPage,
     currentProjectId,
+    pageChatMessages,
+    pageChatMessagesError,
+    pageChatMessagesLoaded,
+    pageChatMessagesLoading,
+    previewProjectChatExpanded,
     activePreviewThemeId,
     applyTheme,
     hasProject,
@@ -539,6 +654,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     isDeletingFile,
     loadChatMessages,
     loadFiles,
+    loadPageChatMessages,
     loadProject,
     loadThemePresets,
     project,
@@ -550,10 +666,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     previewThemeSyncError,
     previewThemeSyncing,
     refreshChatMessages,
+    refreshPageChatMessages,
     refreshWorkspace,
+    resetPageChatMessageState,
     resetWorkspace,
     setMode,
     setPreviewPage,
+    setPreviewProjectChatExpanded,
     syncPreviewTheme,
     themeApplyingId,
     themePresets,
@@ -617,6 +736,7 @@ function mergeUploadedFiles(existingFiles: UploadedFile[], nextFiles: UploadedFi
 function normalizeChatMessageListOptions(options?: ChatMessageListOptions): ChatMessageListOptions {
   return {
     includeGlobal: options?.includeGlobal ?? false,
+    includePageMessages: options?.includePageMessages ?? false,
     limit: options?.limit,
     pageNumber: options?.pageNumber
   }
@@ -627,8 +747,17 @@ function areChatMessageListOptionsEqual(
   right: ChatMessageListOptions
 ): boolean {
   return left.includeGlobal === right.includeGlobal
+    && left.includePageMessages === right.includePageMessages
     && left.limit === right.limit
     && left.pageNumber === right.pageNumber
+}
+
+function normalizePageNumber(pageNumber: number): number | null {
+  if (!Number.isFinite(pageNumber)) {
+    return null
+  }
+
+  return Math.max(1, Math.floor(pageNumber))
 }
 
 function sortChatMessages(messages: ChatMessage[]): ChatMessage[] {

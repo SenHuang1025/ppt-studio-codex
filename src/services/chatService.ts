@@ -3,6 +3,7 @@ import type { ChatMessageListResponse } from '@/types/chat'
 
 export interface ChatMessageListOptions {
   includeGlobal?: boolean
+  includePageMessages?: boolean
   limit?: number
   pageNumber?: number
 }
@@ -16,6 +17,7 @@ export const chatService = {
     return apiClient.get<ChatMessageListResponse>(encodeProjectChatMessagesPath(projectId), {
       params: {
         include_global: options?.includeGlobal,
+        include_page_messages: options?.includePageMessages,
         limit: options?.limit,
         page_number: options?.pageNumber
       }

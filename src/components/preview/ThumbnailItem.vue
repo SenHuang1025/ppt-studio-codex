@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { NDropdown, type DropdownOption } from 'naive-ui'
 import LinearProgressGlow from '@/components/common/LinearProgressGlow.vue'
 import type { PreviewPageItem } from '@/types/preview'
 import { formatPreviewPageType, getPreviewPageStatusLabel } from '@/utils/preview'
+
+type ThumbnailMenuKey = 'delete' | 'duplicate' | 'history' | 'insert-after'
 
 const props = defineProps<{
   currentGeneratingPageNumber: number | null
@@ -11,12 +14,38 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  deletePage: [pageNumber: number]
+  duplicatePage: [pageNumber: number]
+  insertPageAfter: [pageNumber: number]
+  openVersionHistory: [pageNumber: number]
   select: [pageNumber: number]
 }>()
+
+const menuOptions = computed<DropdownOption[]>(() => [
+  {
+    disabled: !props.item.hasGeneratedCode,
+    key: 'history',
+    label: '查看历史版本'
+  },
+  {
+    key: 'insert-after',
+    label: '在后面插入新页'
+  },
+  {
+    disabled: !props.item.hasGeneratedCode,
+    key: 'duplicate',
+    label: '复制'
+  },
+  {
+    key: 'delete',
+    label: '删除'
+  }
+])
 
 const statusLabel = computed<string>(() => getPreviewPageStatusLabel(props.item.status))
 const pageTypeLabel = computed<string>(() => formatPreviewPageType(props.item.pageType))
 const versionLabel = computed<string>(() => (props.item.version ? `v${props.item.version}` : '等待版本'))
+const messageCountLabel = computed<string>(() => `${props.item.chatMessageCount} 条对话`)
 const summaryLabel = computed<string>(() => props.item.contentBrief || props.item.layout || '等待当前页内容写入')
 const isCurrentGeneratingPage = computed<boolean>(() =>
   props.item.status === 'generating' && props.currentGeneratingPageNumber === props.item.pageNumber
@@ -24,6 +53,8 @@ const isCurrentGeneratingPage = computed<boolean>(() =>
 
 const statusClass = computed<string>(() => {
   switch (props.item.status) {
+    case 'confirmed':
+      return 'bg-[rgba(88,151,109,0.96)]'
     case 'generated':
       return 'bg-[color:var(--primary-200)]'
     case 'generating':
@@ -40,6 +71,10 @@ const buttonClass = computed<string>(() => {
     return 'border-[rgba(241,143,1,0.28)] bg-[rgba(255,244,230,0.96)] text-[color:var(--accent-200)] shadow-[var(--shadow-hover)]'
   }
 
+  if (props.selected && props.item.status === 'confirmed') {
+    return 'border-[rgba(88,151,109,0.34)] bg-[rgba(240,249,243,0.98)] text-[color:var(--primary-300)] shadow-[var(--shadow-hover)]'
+  }
+
   if (props.selected) {
     return 'border-[color:var(--app-border-strong)] bg-[color:var(--app-primary-soft)] text-[color:var(--primary-300)] shadow-[var(--shadow-hover)]'
   }
@@ -49,6 +84,8 @@ const buttonClass = computed<string>(() => {
 
 const previewBlockClass = computed<string>(() => {
   switch (props.item.status) {
+    case 'confirmed':
+      return 'border-[rgba(88,151,109,0.24)] bg-[linear-gradient(180deg,rgba(245,252,247,0.98)_0%,rgba(231,243,235,0.98)_100%)] shadow-[0_10px_24px_rgba(88,151,109,0.1)]'
     case 'generated':
       return 'border-[rgba(104,166,125,0.2)] bg-[linear-gradient(180deg,rgba(255,251,243,0.98)_0%,rgba(247,240,226,0.98)_100%)]'
     case 'generating':
@@ -62,6 +99,8 @@ const previewBlockClass = computed<string>(() => {
 
 const progressTone = computed<'accent' | 'muted' | 'primary'>(() => {
   switch (props.item.status) {
+    case 'confirmed':
+      return 'primary'
     case 'generated':
       return 'primary'
     case 'generating':
@@ -73,6 +112,8 @@ const progressTone = computed<'accent' | 'muted' | 'primary'>(() => {
 
 const progressValue = computed<number>(() => {
   switch (props.item.status) {
+    case 'confirmed':
+      return 1
     case 'generated':
       return 1
     case 'generating':
@@ -81,14 +122,29 @@ const progressValue = computed<number>(() => {
       return 0.08
   }
 })
+
+function handleMenuSelect(key: string | number): void {
+  switch (key as ThumbnailMenuKey) {
+    case 'delete':
+      emit('deletePage', props.item.pageNumber)
+      return
+    case 'duplicate':
+      emit('duplicatePage', props.item.pageNumber)
+      return
+    case 'history':
+      emit('openVersionHistory', props.item.pageNumber)
+      return
+    case 'insert-after':
+      emit('insertPageAfter', props.item.pageNumber)
+      return
+  }
+}
 </script>
 
 <template>
-  <button
+  <div
     class="w-full rounded-[var(--radius-xl)] border p-3 text-left transition duration-250"
     :class="buttonClass"
-    type="button"
-    @click="emit('select', item.pageNumber)"
   >
     <div class="mb-3 flex items-start justify-between gap-3">
       <div class="min-w-0">
@@ -104,15 +160,34 @@ const progressValue = computed<number>(() => {
         </div>
       </div>
 
-      <div class="mt-1 flex items-center gap-2">
-        <span class="h-2.5 w-2.5 shrink-0 rounded-full" :class="statusClass" />
-        <span class="text-xs text-[color:var(--app-text-secondary)]">{{ statusLabel }}</span>
+      <div class="mt-1 flex items-start gap-2">
+        <div class="flex items-center gap-2 pt-1">
+          <span class="h-2.5 w-2.5 shrink-0 rounded-full" :class="statusClass" />
+          <span class="text-xs text-[color:var(--app-text-secondary)]">{{ statusLabel }}</span>
+        </div>
+        <NDropdown
+          :options="menuOptions"
+          placement="bottom-end"
+          trigger="click"
+          @select="handleMenuSelect"
+        >
+          <button
+            data-thumbnail-drag-ignore="true"
+            class="flex h-7 w-7 items-center justify-center rounded-full border border-[rgba(131,53,0,0.12)] bg-[rgba(255,255,255,0.68)] text-xs text-[color:var(--app-text-secondary)] transition duration-200 hover:border-[rgba(131,53,0,0.24)] hover:text-[color:var(--primary-300)]"
+            type="button"
+            @click.stop
+          >
+            ···
+          </button>
+        </NDropdown>
       </div>
     </div>
 
-    <div
+    <button
       class="relative aspect-[16/9] overflow-hidden rounded-[var(--radius-lg)] border px-3 py-3"
       :class="previewBlockClass"
+      type="button"
+      @click="emit('select', item.pageNumber)"
     >
       <div v-if="item.status === 'generating'" class="thumbnail-generating-sheen absolute inset-y-0 left-[-32%] w-1/3" />
       <div class="absolute inset-x-3 top-3">
@@ -138,13 +213,18 @@ const progressValue = computed<number>(() => {
           <div class="line-clamp-2 min-w-0 leading-5">
             {{ summaryLabel }}
           </div>
-          <div class="shrink-0 rounded-full border border-[rgba(131,53,0,0.12)] px-2 py-0.5">
-            {{ versionLabel }}
+          <div class="shrink-0 text-right">
+            <div class="rounded-full border border-[rgba(131,53,0,0.12)] px-2 py-0.5">
+              {{ versionLabel }}
+            </div>
+            <div class="mt-1 text-[10px] text-[color:var(--app-text-tertiary)]">
+              {{ messageCountLabel }}
+            </div>
           </div>
         </div>
       </div>
-    </div>
-  </button>
+    </button>
+  </div>
 </template>
 
 <style scoped>
