@@ -4,7 +4,15 @@ import asyncio
 
 import pytest
 
-from app.agents.llm import LLMRuntimeConfig, MissingAPIKeyError, build_llm_runtime, create_chat_model
+from app.agents.llm import (
+    InvalidAPIKeyError,
+    LLMInvocationError,
+    LLMRuntimeConfig,
+    MissingAPIKeyError,
+    build_llm_runtime,
+    create_chat_model,
+    invoke_model_text_with_retry,
+)
 from app.schemas import AppTheme, LLMProvider, SettingsResponse
 
 
@@ -81,3 +89,43 @@ def test_create_chat_model_uses_anthropic_factory(monkeypatch: pytest.MonkeyPatc
 
     assert model is not None
     assert captured_config == [runtime_config]
+
+
+def test_invoke_model_text_with_retry_retries_until_success() -> None:
+    class FlakyModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, _messages: object) -> object:
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("temporary upstream failure")
+            return {"content": "ok"}
+
+    model = FlakyModel()
+    result = asyncio.run(invoke_model_text_with_retry(model, [("user", "hello")], retries=3))
+
+    assert result == "ok"
+    assert model.calls == 3
+
+
+def test_invoke_model_text_with_retry_maps_invalid_api_key() -> None:
+    class InvalidKeyModel:
+        async def ainvoke(self, _messages: object) -> object:
+            raise RuntimeError("401 invalid api key")
+
+    with pytest.raises(InvalidAPIKeyError) as exc_info:
+        asyncio.run(invoke_model_text_with_retry(InvalidKeyModel(), [("user", "hello")], retries=3))
+
+    assert "设置页" in str(exc_info.value)
+
+
+def test_invoke_model_text_with_retry_raises_friendly_llm_error() -> None:
+    class BrokenModel:
+        async def ainvoke(self, _messages: object) -> object:
+            raise RuntimeError("gateway timeout")
+
+    with pytest.raises(LLMInvocationError) as exc_info:
+        asyncio.run(invoke_model_text_with_retry(BrokenModel(), [("user", "hello")], retries=2))
+
+    assert "LLM 调用失败" in str(exc_info.value)

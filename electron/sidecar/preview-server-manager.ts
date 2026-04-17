@@ -21,6 +21,7 @@ export class PreviewServerManager {
   private startPromise: Promise<void> | null = null
   private stopPromise: Promise<void> | null = null
   private usingExistingService = false
+  private restartAttempts = 0
   private readonly baseUrl = `http://${PREVIEW_HOST}:${PREVIEW_PORT}`
 
   public async start(): Promise<void> {
@@ -87,6 +88,12 @@ export class PreviewServerManager {
         }
 
         this.process = null
+        if (!this.usingExistingService && code !== 0 && signal !== 'SIGTERM' && signal !== 'SIGINT') {
+          void this.recover().catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error)
+            this.log('error', `Automatic preview server recovery failed: ${message}`)
+          })
+        }
       })
     }).finally(() => {
       this.startPromise = null
@@ -152,6 +159,22 @@ export class PreviewServerManager {
 
   public getThemeFile(): string {
     return path.join(this.resolvePreviewDirectory(), 'src', 'theme', 'variables.css')
+  }
+
+  public getStatus(): { baseUrl: string; restartAttempts: number; running: boolean; usingExistingService: boolean } {
+    return {
+      baseUrl: this.baseUrl,
+      restartAttempts: this.restartAttempts,
+      running: this.isRunning(),
+      usingExistingService: this.usingExistingService
+    }
+  }
+
+  public async recover(): Promise<void> {
+    this.restartAttempts += 1
+    await this.stop().catch(() => undefined)
+    await this.start()
+    await this.waitForReady()
   }
 
   private async stopProcess(child: ChildProcessWithoutNullStreams): Promise<void> {

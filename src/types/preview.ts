@@ -60,6 +60,7 @@ export interface PreviewPageItem {
   pageNumber: number
   pageType: string | null
   status: PreviewPageStatus
+  thumbnailSignature: string | null
   title: string
   updatedAt: string | null
   version: number | null

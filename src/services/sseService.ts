@@ -20,11 +20,34 @@ import type {
   ThinkingEventPayload
 } from '@/types/chat'
 
+type StreamMode = 'chat' | 'confirm-outline' | 'generate-page'
+
+interface StreamOpenPayload {
+  includeApiKey: boolean
+  payload: object
+  streamMode: StreamMode
+  url: string
+}
+
+interface ActiveStreamSession {
+  controller: AbortController
+  includeApiKey: boolean
+  payload: object
+  streamId: string | null
+  streamMode: StreamMode
+  url: string
+}
+
 type EventHandler<TPayload> = (payload: TPayload) => void
 type AnyEventHandler = (event: AgentStreamEvent) => void
+type ReconnectHandler = (attempt: number) => void
 
 export class AgentSSEClient {
   private abortController: AbortController | null = null
+  private activeSession: ActiveStreamSession | null = null
+  private reconnectAttempt = 0
+  private reconnectTimerId: number | null = null
+  private intentionalDisconnect = false
   private readonly thinkingHandlers = new Set<EventHandler<ThinkingEventPayload>>()
   private readonly fileParsedHandlers = new Set<EventHandler<FileParsedEventPayload>>()
   private readonly outlineHandlers = new Set<EventHandler<OutlineEventPayload>>()
@@ -38,6 +61,7 @@ export class AgentSSEClient {
   private readonly assistantMessageHandlers = new Set<EventHandler<AssistantMessageEventPayload>>()
   private readonly errorHandlers = new Set<EventHandler<ErrorEventPayload>>()
   private readonly doneHandlers = new Set<EventHandler<Record<string, never>>>()
+  private readonly reconnectHandlers = new Set<ReconnectHandler>()
   private readonly anyEventHandlers = new Set<AnyEventHandler>()
 
   public async connect(projectId: string, message: string, pageNumber?: number): Promise<void> {
@@ -57,6 +81,7 @@ export class AgentSSEClient {
     await this.openStream({
       includeApiKey: true,
       payload: this.buildRequestPayload(normalizedMessage, pageNumber),
+      streamMode: 'chat',
       url: await this.buildChatUrl(normalizedProjectId)
     })
   }
@@ -72,6 +97,7 @@ export class AgentSSEClient {
     await this.openStream({
       includeApiKey: true,
       payload: this.buildConfirmOutlinePayload(outline),
+      streamMode: 'confirm-outline',
       url: await this.buildConfirmOutlineUrl(normalizedProjectId)
     })
   }
@@ -93,13 +119,35 @@ export class AgentSSEClient {
     await this.openStream({
       includeApiKey: true,
       payload: {},
+      streamMode: 'generate-page',
       url: await this.buildGeneratePageUrl(normalizedProjectId, normalizedPageNumber)
     })
   }
 
   public disconnect(): void {
+    this.intentionalDisconnect = true
+    this.clearReconnectTimer()
+    void this.cancelActiveStream().catch(() => undefined)
     this.abortController?.abort()
     this.abortController = null
+    this.activeSession = null
+  }
+
+  public async reconnect(): Promise<void> {
+    if (!this.activeSession) {
+      throw new Error('当前没有可恢复的实时会话。')
+    }
+
+    const previousSession = this.activeSession
+    await this.openStream({
+      includeApiKey: previousSession.includeApiKey,
+      payload: previousSession.payload,
+      streamMode: previousSession.streamMode,
+      url: previousSession.url
+    }, {
+      reconnecting: true,
+      streamId: previousSession.streamId
+    })
   }
 
   public onThinking(callback: EventHandler<ThinkingEventPayload>): () => void {
@@ -154,6 +202,10 @@ export class AgentSSEClient {
     return this.registerHandler(this.doneHandlers, callback)
   }
 
+  public onReconnect(callback: ReconnectHandler): () => void {
+    return this.registerHandler(this.reconnectHandlers, callback)
+  }
+
   public onEvent(callback: AnyEventHandler): () => void {
     return this.registerHandler(this.anyEventHandlers, callback)
   }
@@ -201,13 +253,17 @@ export class AgentSSEClient {
     return { outline }
   }
 
-  private async openStream(options: {
-    includeApiKey: boolean
-    payload: object
-    url: string
-  }): Promise<void> {
+  private async openStream(
+    options: StreamOpenPayload,
+    reconnectOptions?: {
+      reconnecting?: boolean
+      streamId?: string | null
+    }
+  ): Promise<void> {
     const controller = new AbortController()
     this.abortController = controller
+    this.intentionalDisconnect = false
+    this.clearReconnectTimer()
 
     const headers: HeadersInit = {
       accept: 'text/event-stream',
@@ -216,6 +272,19 @@ export class AgentSSEClient {
 
     if (options.includeApiKey) {
       headers['x-ppt-studio-api-key'] = await this.resolveApiKey()
+    }
+
+    if (reconnectOptions?.streamId) {
+      headers['x-ppt-studio-stream-id'] = reconnectOptions.streamId
+    }
+
+    this.activeSession = {
+      controller,
+      includeApiKey: options.includeApiKey,
+      payload: options.payload,
+      streamId: reconnectOptions?.streamId ?? null,
+      streamMode: options.streamMode,
+      url: options.url
     }
 
     try {
@@ -239,13 +308,20 @@ export class AgentSSEClient {
         throw new Error(`Expected an SSE response but received "${contentType || 'unknown'}".`)
       }
 
+      this.reconnectAttempt = 0
+      this.captureStreamId(response)
       await this.consumeEventStream(response.body, controller)
     } catch (error: unknown) {
       if (this.isAbortError(error) && controller.signal.aborted) {
         return
       }
 
-      throw this.normalizeClientError(error)
+      const normalizedError = this.normalizeClientError(error)
+      if (this.shouldScheduleReconnect(normalizedError)) {
+        this.scheduleReconnect()
+      }
+
+      throw normalizedError
     } finally {
       if (this.abortController === controller) {
         this.abortController = null
@@ -294,6 +370,10 @@ export class AgentSSEClient {
       const trailingEvent = parseEventBlock(buffer)
       if (trailingEvent) {
         this.dispatchEvent(trailingEvent)
+      }
+
+      if (!streamCompleted && !controller.signal.aborted) {
+        throw new Error('SSE 连接已中断，正在尝试恢复。')
       }
     } catch (error: unknown) {
       if (this.isAbortError(error) && controller.signal.aborted) {
@@ -354,6 +434,8 @@ export class AgentSSEClient {
         this.emitHandlers(this.errorHandlers, event.data)
         return
       case 'done':
+        this.clearReconnectTimer()
+        this.activeSession = null
         this.emitHandlers(this.doneHandlers, event.data)
         return
     }
@@ -411,6 +493,75 @@ export class AgentSSEClient {
     }
 
     return apiKey
+  }
+
+  private captureStreamId(response: Response): void {
+    const streamId = response.headers.get('x-ppt-studio-stream-id')?.trim() ?? ''
+    if (!streamId || !this.activeSession) {
+      return
+    }
+
+    this.activeSession.streamId = streamId
+  }
+
+  private shouldScheduleReconnect(error: Error): boolean {
+    if (this.intentionalDisconnect || !this.activeSession) {
+      return false
+    }
+
+    if (this.activeSession.streamMode === 'generate-page') {
+      return true
+    }
+
+    if (this.activeSession.streamMode === 'confirm-outline') {
+      return true
+    }
+
+    return true
+  }
+
+  private scheduleReconnect(): void {
+    if (!this.activeSession || this.reconnectTimerId !== null) {
+      return
+    }
+
+    const nextAttempt = this.reconnectAttempt + 1
+    if (nextAttempt > 3) {
+      return
+    }
+
+    this.reconnectAttempt = nextAttempt
+    this.emitHandlers(this.reconnectHandlers, nextAttempt)
+    const reconnectDelay = Math.min(3000, 600 * nextAttempt)
+    this.reconnectTimerId = window.setTimeout(() => {
+      this.reconnectTimerId = null
+      void this.reconnect().catch(() => undefined)
+    }, reconnectDelay)
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimerId === null) {
+      return
+    }
+
+    window.clearTimeout(this.reconnectTimerId)
+    this.reconnectTimerId = null
+  }
+
+  private async cancelActiveStream(): Promise<void> {
+    const activeSession = this.activeSession
+    if (!activeSession?.streamId) {
+      return
+    }
+
+    const baseUrl = await getApiBaseUrl()
+    const cancelPath = activeSession.streamMode === 'generate-page'
+      ? `projects/${extractProjectId(activeSession.url)}/pages/streams/${activeSession.streamId}/cancel`
+      : `projects/${extractProjectId(activeSession.url)}/agent/streams/${activeSession.streamId}/cancel`
+
+    await fetch(new URL(cancelPath, ensureTrailingSlash(baseUrl)).toString(), {
+      method: 'POST'
+    }).catch(() => undefined)
   }
 }
 
@@ -537,4 +688,9 @@ function resolveRuntime(): Window['pptStudio'] {
   }
 
   return window.pptStudio
+}
+
+function extractProjectId(url: string): string {
+  const match = url.match(/projects\/([^/]+)/)
+  return decodeURIComponent(match?.[1] ?? '')
 }

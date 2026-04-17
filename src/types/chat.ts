@@ -30,7 +30,7 @@ export interface AgentConfirmOutlineRequestPayload {
   outline?: Outline | null
 }
 
-export type AgentConnectionState = 'idle' | 'connecting' | 'streaming' | 'completed' | 'error'
+export type AgentConnectionState = 'idle' | 'connecting' | 'reconnecting' | 'streaming' | 'completed' | 'error'
 
 export const AGENT_SSE_EVENT_NAMES = [
   'thinking',

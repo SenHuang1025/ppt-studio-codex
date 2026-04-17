@@ -6,6 +6,7 @@ import GlassPanel from '@/components/common/GlassPanel.vue'
 import CreateProjectDialog from '@/components/dashboard/CreateProjectDialog.vue'
 import ProjectFilter from '@/components/dashboard/ProjectFilter.vue'
 import ProjectGrid from '@/components/dashboard/ProjectGrid.vue'
+import { notifyApiError, resolveAppErrorMessage } from '@/services/errorHandling'
 import { useProjectStore } from '@/stores/projectStore'
 import type { ProjectFilterValue } from '@/stores/projectStore'
 import type { Project } from '@/types/project'
@@ -80,7 +81,9 @@ async function handleDialogSubmit(name: string): Promise<void> {
       params: { id: createdProject.id }
     })
   } catch (cause: unknown) {
-    message.error(resolveErrorMessage(cause))
+    notifyApiError(cause, {
+      fallback: '项目操作失败，请稍后重试。'
+    })
   }
 }
 
@@ -106,7 +109,9 @@ function handleDeleteProject(project: Project): void {
         await projectStore.deleteProject(project.id)
         message.success(`已删除项目「${project.name}」`)
       } catch (cause: unknown) {
-        message.error(resolveErrorMessage(cause))
+        notifyApiError(cause, {
+          fallback: '删除项目失败，请稍后重试。'
+        })
         throw cause
       }
     }
@@ -121,7 +126,9 @@ async function handleFilterChange(filter: ProjectFilterValue): Promise<void> {
   try {
     await projectStore.setFilter(filter)
   } catch (cause: unknown) {
-    message.error(resolveErrorMessage(cause))
+    notifyApiError(cause, {
+      fallback: '项目筛选失败，请稍后重试。'
+    })
   }
 }
 
@@ -129,7 +136,9 @@ async function retryLoadProjects(): Promise<void> {
   try {
     await projectStore.loadProjects()
   } catch (cause: unknown) {
-    message.error(resolveErrorMessage(cause))
+    notifyApiError(cause, {
+      fallback: '项目加载失败，请稍后重试。'
+    })
   }
 }
 
@@ -143,11 +152,7 @@ function closeDialog(): void {
 }
 
 function resolveErrorMessage(cause: unknown): string {
-  if (cause instanceof Error && cause.message.trim()) {
-    return cause.message.trim()
-  }
-
-  return '项目操作失败，请稍后重试。'
+  return resolveAppErrorMessage(cause, '项目操作失败，请稍后重试。')
 }
 </script>
 

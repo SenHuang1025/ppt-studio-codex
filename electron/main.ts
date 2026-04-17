@@ -3,7 +3,11 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import {
   PREVIEW_SERVER_GET_BASE_URL_CHANNEL,
   PREVIEW_SERVER_GET_SLIDES_DIR_CHANNEL,
+  PREVIEW_SERVER_GET_STATUS_CHANNEL,
+  PREVIEW_SERVER_RECOVER_CHANNEL,
   PYTHON_SIDECAR_GET_BASE_URL_CHANNEL,
+  PYTHON_SIDECAR_GET_STATUS_CHANNEL,
+  PYTHON_SIDECAR_RECOVER_CHANNEL,
   SETTINGS_CLEAR_API_KEY_CHANNEL,
   SETTINGS_GET_API_KEY_CHANNEL,
   SETTINGS_SET_API_KEY_CHANNEL
@@ -65,7 +69,11 @@ function createWindow(): void {
 function registerIpcHandlers(): void {
   ipcMain.handle(PREVIEW_SERVER_GET_BASE_URL_CHANNEL, () => previewServerManager.getBaseUrl())
   ipcMain.handle(PREVIEW_SERVER_GET_SLIDES_DIR_CHANNEL, () => previewServerManager.getSlidesDir())
+  ipcMain.handle(PREVIEW_SERVER_GET_STATUS_CHANNEL, () => previewServerManager.getStatus())
+  ipcMain.handle(PREVIEW_SERVER_RECOVER_CHANNEL, () => previewServerManager.recover())
   ipcMain.handle(PYTHON_SIDECAR_GET_BASE_URL_CHANNEL, () => pythonSidecar.getBaseUrl())
+  ipcMain.handle(PYTHON_SIDECAR_GET_STATUS_CHANNEL, () => pythonSidecar.getStatus())
+  ipcMain.handle(PYTHON_SIDECAR_RECOVER_CHANNEL, () => pythonSidecar.recover())
   ipcMain.handle(SETTINGS_GET_API_KEY_CHANNEL, () => secureSettingsStore.getApiKey())
   ipcMain.handle(SETTINGS_SET_API_KEY_CHANNEL, (_event, apiKey: string) => secureSettingsStore.setApiKey(apiKey))
   ipcMain.handle(SETTINGS_CLEAR_API_KEY_CHANNEL, () => secureSettingsStore.clearApiKey())

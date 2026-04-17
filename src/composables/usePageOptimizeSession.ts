@@ -91,6 +91,7 @@ export function usePageOptimizeSession(options: UsePageOptimizeSessionOptions) {
   agentClient.onAssistantMessage(handleAssistantMessageEvent)
   agentClient.onError(handleAgentErrorEvent)
   agentClient.onDone(handleAgentDone)
+  agentClient.onReconnect(handleAgentReconnect)
   agentClient.onEvent(pushAgentEventLog)
 
   watch(
@@ -498,6 +499,21 @@ export function usePageOptimizeSession(options: UsePageOptimizeSessionOptions) {
     clearThinkingTimelineItem()
     if (isStreamVisible()) {
       appendSessionItem(createStatusTimelineItem('优化失败', payload.message, 'error'))
+    }
+  }
+
+  function handleAgentReconnect(attempt: number): void {
+    latestError.value = null
+    agentConnectionState.value = 'reconnecting'
+    activeOptimizingPageNumber.value = currentStreamPageNumber.value
+    if (isStreamVisible()) {
+      appendSessionItem(
+        createStatusTimelineItem(
+          '连接恢复中',
+          `优化会话连接意外断开，正在尝试第 ${attempt} 次恢复，不会重复提交当前页请求。`,
+          'warning'
+        )
+      )
     }
   }
 

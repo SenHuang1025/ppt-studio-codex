@@ -1,5 +1,16 @@
 """Service layer placeholder for future business logic."""
 from app.services.chat_service import ChatMessageNotFoundError, ChatService, ChatServiceError, ChatStorageError
+from app.services.export_service import (
+    ExportArtifactNotReadyError,
+    ExportConflictError,
+    ExportDependencyError,
+    ExportPageSnapshot,
+    ExportProjectSnapshot,
+    ExportRenderError,
+    ExportTaskManager,
+    ExportTaskNotFoundError,
+    ExportValidationError,
+)
 from app.services.file_service import (
     FileParsingError,
     FileService,
@@ -26,6 +37,15 @@ from app.services.project_service import (
     ProjectServiceError,
     ProjectStorageError,
 )
+from app.services.thumbnail_service import (
+    ThumbnailDependencyError,
+    ThumbnailNotFoundError,
+    ThumbnailPageSnapshot,
+    ThumbnailProjectSnapshot,
+    ThumbnailRenderError,
+    ThumbnailService,
+    ThumbnailServiceError,
+)
 from app.services.settings_service import SettingsService, SettingsServiceError
 from app.services.sse_manager import SSEManager, SSEManagerError
 from app.services.theme_service import ThemeService, ThemeServiceError, ThemeValidationError, ThemeWriteError
@@ -35,6 +55,15 @@ __all__ = [
     "ChatService",
     "ChatServiceError",
     "ChatStorageError",
+    "ExportArtifactNotReadyError",
+    "ExportConflictError",
+    "ExportDependencyError",
+    "ExportPageSnapshot",
+    "ExportProjectSnapshot",
+    "ExportRenderError",
+    "ExportTaskManager",
+    "ExportTaskNotFoundError",
+    "ExportValidationError",
     "FileParsingError",
     "FileService",
     "FileServiceError",
@@ -61,6 +90,13 @@ __all__ = [
     "ThemeServiceError",
     "ThemeValidationError",
     "ThemeWriteError",
+    "ThumbnailDependencyError",
+    "ThumbnailNotFoundError",
+    "ThumbnailPageSnapshot",
+    "ThumbnailProjectSnapshot",
+    "ThumbnailRenderError",
+    "ThumbnailService",
+    "ThumbnailServiceError",
     "UnsupportedFileTypeError",
     "UploadedFileNotFoundError",
 ]

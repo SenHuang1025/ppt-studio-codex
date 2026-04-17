@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { DropdownOption } from 'naive-ui'
 import { NDropdown } from 'naive-ui'
 import GlassPanel from '@/components/common/GlassPanel.vue'
+import { buildPageThumbnailUrl } from '@/services/thumbnailService'
 import type { Project } from '@/types/project'
 import { PROJECT_STATUS_META, formatProjectPageCount, formatProjectUpdatedAt, getProjectInitial } from '@/utils/project'
 
@@ -34,6 +35,11 @@ const menuOptions = computed<DropdownOption[]>(() => [
 ])
 
 const statusMeta = computed(() => PROJECT_STATUS_META[props.project.status])
+const firstThumbnailLoadFailed = ref(false)
+const firstThumbnailUrl = ref<string | null>(null)
+const showFirstThumbnail = computed<boolean>(() =>
+  Boolean(firstThumbnailUrl.value && !firstThumbnailLoadFailed.value)
+)
 const statusBadgeClass = computed<string>(() => {
   switch (statusMeta.value.tone) {
     case 'accent':
@@ -63,6 +69,30 @@ const footerLabel = computed<string>(() => {
   return '点击继续创作'
 })
 
+watch(
+  [() => props.project.id, () => props.project.first_thumbnail_updated_at],
+  async ([projectId, signature]) => {
+    firstThumbnailLoadFailed.value = false
+
+    if (!signature) {
+      firstThumbnailUrl.value = null
+      return
+    }
+
+    try {
+      firstThumbnailUrl.value = await buildPageThumbnailUrl({
+        pageNumber: 1,
+        projectId,
+        signature
+      })
+    } catch {
+      firstThumbnailUrl.value = null
+      firstThumbnailLoadFailed.value = true
+    }
+  },
+  { immediate: true }
+)
+
 function handleOpen(): void {
   if (props.deleting) {
     return
@@ -84,6 +114,10 @@ function handleMenuSelect(key: string | number): void {
   }
 
   emit('delete', props.project)
+}
+
+function handleFirstThumbnailError(): void {
+  firstThumbnailLoadFailed.value = true
 }
 </script>
 
@@ -123,8 +157,19 @@ function handleMenuSelect(key: string | number): void {
       </NDropdown>
     </div>
 
-    <div class="mb-5 rounded-[var(--radius-xl)] border border-[color:var(--app-border-subtle)] bg-[linear-gradient(180deg,rgba(255,253,248,0.95)_0%,rgba(248,240,225,0.92)_100%)] p-5">
-      <div class="flex items-center justify-between gap-3">
+    <div class="relative mb-5 overflow-hidden rounded-[var(--radius-xl)] border border-[color:var(--app-border-subtle)] bg-[linear-gradient(180deg,rgba(255,253,248,0.95)_0%,rgba(248,240,225,0.92)_100%)] p-5">
+      <img
+        v-if="showFirstThumbnail && firstThumbnailUrl"
+        :alt="`${project.name} 第一页缩略图`"
+        class="absolute inset-0 h-full w-full object-cover"
+        :src="firstThumbnailUrl"
+        @error="handleFirstThumbnailError"
+      >
+      <div
+        v-if="showFirstThumbnail"
+        class="absolute inset-0 bg-[linear-gradient(180deg,rgba(28,22,14,0.22)_0%,rgba(28,22,14,0.04)_45%,rgba(28,22,14,0.34)_100%)]"
+      />
+      <div class="relative z-1 flex items-center justify-between gap-3">
         <span
           class="inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium"
           :class="statusBadgeClass"
@@ -136,11 +181,17 @@ function handleMenuSelect(key: string | number): void {
         </span>
       </div>
 
-      <div class="mt-8 flex items-end justify-between gap-3">
-        <div class="text-[3rem] leading-none text-[color:var(--primary-300)]">
+      <div class="relative z-1 mt-8 flex items-end justify-between gap-3">
+        <div
+          class="text-[3rem] leading-none"
+          :class="showFirstThumbnail ? 'text-white drop-shadow-[0_4px_14px_rgba(28,22,14,0.32)]' : 'text-[color:var(--primary-300)]'"
+        >
           {{ getProjectInitial(project.name) }}
         </div>
-        <div class="rounded-full bg-[rgba(255,255,255,0.72)] px-3 py-1 text-xs text-[color:var(--app-text-secondary)]">
+        <div
+          class="rounded-full px-3 py-1 text-xs"
+          :class="showFirstThumbnail ? 'bg-[rgba(28,22,14,0.48)] text-white' : 'bg-[rgba(255,255,255,0.72)] text-[color:var(--app-text-secondary)]'"
+        >
           {{ formatProjectPageCount(project.total_pages) }}
         </div>
       </div>

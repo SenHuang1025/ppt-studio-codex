@@ -192,7 +192,9 @@ def test_agent_chat_returns_400_when_api_key_is_missing(
         )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "请先在设置页配置 API Key。"
+    payload = response.json()
+    assert payload["error"] == "请先在设置页配置 API Key。"
+    assert payload["detail"] == "请先在设置页配置 API Key。"
 
 
 def test_confirm_outline_returns_400_when_api_key_is_missing(
@@ -209,7 +211,9 @@ def test_confirm_outline_returns_400_when_api_key_is_missing(
         )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "请先在设置页配置 API Key。"
+    payload = response.json()
+    assert payload["error"] == "请先在设置页配置 API Key。"
+    assert payload["detail"] == "请先在设置页配置 API Key。"
 
 
 def test_agent_chat_streams_file_analysis_outline_and_done(

@@ -10,10 +10,10 @@ from sse_starlette import EventSourceResponse
 
 from app.agents import API_KEY_HEADER, AgentGraphContext, build_llm_runtime, run_agent_workflow
 from app.agents.page_generator import generate_page_code
-from app.agents.llm import LLMConfigurationError, MissingAPIKeyError
+from app.agents.llm import InvalidAPIKeyError, LLMConfigurationError, MissingAPIKeyError
 from app.api.chat import get_chat_service
 from app.api.files import get_file_service
-from app.api.pages import get_page_service
+from app.api.pages import get_page_service, get_thumbnail_service
 from app.api.projects import get_project_service
 from app.api.settings import get_settings_service
 from app.api.themes import get_theme_service
@@ -33,6 +33,7 @@ from app.services import (
     SSEManager,
     SettingsService,
     ThemeService,
+    ThumbnailService,
 )
 
 router = APIRouter(prefix="/api/projects/{project_id}/agent", tags=["agent"])
@@ -46,7 +47,7 @@ def get_sse_manager(request: Request) -> SSEManager:
 
 
 def _raise_agent_http_error(exc: Exception) -> NoReturn:
-    if isinstance(exc, (MissingAPIKeyError, LLMConfigurationError)):
+    if isinstance(exc, (MissingAPIKeyError, InvalidAPIKeyError, LLMConfigurationError)):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     raise exc
 
@@ -65,6 +66,7 @@ async def chat_with_agent(
     theme_service: ThemeService = Depends(get_theme_service),
 ) -> EventSourceResponse:
     api_key = request.headers.get(API_KEY_HEADER, "").strip()
+    requested_stream_id = request.headers.get("x-ppt-studio-stream-id", "").strip() or None
 
     try:
         llm_runtime = await build_llm_runtime(
@@ -74,7 +76,11 @@ async def chat_with_agent(
     except Exception as exc:
         _raise_agent_http_error(exc)
 
-    stream_id, stream = await sse_manager.open_stream(project_id)
+    if requested_stream_id and await sse_manager.has_stream(project_id, stream_id=requested_stream_id):
+        stream_id = requested_stream_id
+        stream = await sse_manager.create_stream(project_id, stream_id=stream_id)
+    else:
+        stream_id, stream = await sse_manager.open_stream(project_id)
 
     async def stream_response() -> AsyncGenerator[object, None]:
         producer_task = asyncio.create_task(
@@ -91,11 +97,12 @@ async def chat_with_agent(
                 llm_runtime=llm_runtime,
             )
         )
+        await sse_manager.register_producer_task(project_id, stream_id=stream_id, producer_task=producer_task)
 
         try:
             async for event in stream:
                 if await request.is_disconnected():
-                    producer_task.cancel()
+                    await sse_manager.mark_client_disconnected(project_id, stream_id=stream_id)
                     break
 
                 yield event
@@ -108,9 +115,10 @@ async def chat_with_agent(
             except asyncio.CancelledError:
                 pass
 
-            await sse_manager.close_stream(project_id, stream_id=stream_id)
+            if producer_task.done():
+                await sse_manager.close_stream(project_id, stream_id=stream_id)
 
-    return EventSourceResponse(stream_response(), ping=None)
+    return EventSourceResponse(stream_response(), ping=None, headers={"x-ppt-studio-stream-id": stream_id})
 
 
 @router.post("/confirm-outline")
@@ -125,8 +133,10 @@ async def confirm_outline(
     settings_service: SettingsService = Depends(get_settings_service),
     sse_manager: SSEManager = Depends(get_sse_manager),
     theme_service: ThemeService = Depends(get_theme_service),
+    thumbnail_service: ThumbnailService = Depends(get_thumbnail_service),
 ) -> EventSourceResponse:
     api_key = request.headers.get(API_KEY_HEADER, "").strip()
+    requested_stream_id = request.headers.get("x-ppt-studio-stream-id", "").strip() or None
 
     try:
         llm_runtime = await build_llm_runtime(
@@ -136,7 +146,11 @@ async def confirm_outline(
     except Exception as exc:
         _raise_agent_http_error(exc)
 
-    stream_id, stream = await sse_manager.open_stream(project_id)
+    if requested_stream_id and await sse_manager.has_stream(project_id, stream_id=requested_stream_id):
+        stream_id = requested_stream_id
+        stream = await sse_manager.create_stream(project_id, stream_id=stream_id)
+    else:
+        stream_id, stream = await sse_manager.open_stream(project_id)
 
     async def stream_response() -> AsyncGenerator[object, None]:
         producer_task = asyncio.create_task(
@@ -151,13 +165,15 @@ async def confirm_outline(
                 sse_manager=sse_manager,
                 stream_id=stream_id,
                 theme_service=theme_service,
+                thumbnail_service=thumbnail_service,
             )
         )
+        await sse_manager.register_producer_task(project_id, stream_id=stream_id, producer_task=producer_task)
 
         try:
             async for event in stream:
                 if await request.is_disconnected():
-                    producer_task.cancel()
+                    await sse_manager.mark_client_disconnected(project_id, stream_id=stream_id)
                     break
 
                 yield event
@@ -170,9 +186,19 @@ async def confirm_outline(
             except asyncio.CancelledError:
                 pass
 
-            await sse_manager.close_stream(project_id, stream_id=stream_id)
+            if producer_task.done():
+                await sse_manager.close_stream(project_id, stream_id=stream_id)
 
-    return EventSourceResponse(stream_response(), ping=None)
+    return EventSourceResponse(stream_response(), ping=None, headers={"x-ppt-studio-stream-id": stream_id})
+
+
+@router.post("/streams/{stream_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)
+async def cancel_agent_stream(
+    project_id: str,
+    stream_id: str,
+    sse_manager: SSEManager = Depends(get_sse_manager),
+) -> None:
+    await sse_manager.cancel_stream(project_id, stream_id=stream_id)
 
 
 async def _produce_agent_events(
@@ -270,6 +296,7 @@ async def _produce_confirm_outline_events(
     sse_manager: SSEManager,
     stream_id: str,
     theme_service: ThemeService,
+    thumbnail_service: ThumbnailService,
 ) -> None:
     cancelled = False
 
@@ -358,6 +385,17 @@ async def _produce_confirm_outline_events(
                 vue_code=page_code,
             )
             existing_page_code_map[outline_page.page_number] = page_code
+            try:
+                await thumbnail_service.refresh_from_preview(
+                    project_id=project_id,
+                    page_numbers=[outline_page.page_number],
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to refresh thumbnail for project {} page {}",
+                    project_id,
+                    outline_page.page_number,
+                )
 
             await _safe_send_event(
                 sse_manager,

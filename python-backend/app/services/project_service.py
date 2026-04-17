@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
@@ -36,6 +37,7 @@ class ProjectService:
         "pages",
         "versions",
         "thumbnails",
+        "exports",
     )
     SORT_FIELDS = {
         "updated_at": Project.updated_at,
@@ -71,6 +73,8 @@ class ProjectService:
 
         total = int((await self.session.execute(count_stmt)).scalar_one())
         projects = list((await self.session.execute(query_stmt)).scalars().all())
+        for project in projects:
+            self._attach_thumbnail_metadata(project)
         return projects, total
 
     async def create_project(self, payload: ProjectCreate) -> Project:
@@ -94,13 +98,23 @@ class ProjectService:
             ) from exc
 
         logger.info("Created project {} at {}", project.id, self.settings.project_dir(project.id))
+        self._attach_thumbnail_metadata(project)
         return project
 
     async def get_project_detail(self, project_id: str) -> Project:
         project = await self._get_project_or_raise(project_id, include_pages=True)
         page_message_counts = await self._count_page_messages(project_id)
+        self._attach_thumbnail_metadata(project)
         for page in getattr(project, "pages", []) or []:
             setattr(page, "chat_message_count", int(page_message_counts.get(int(page.page_number), 0)))
+            setattr(
+                page,
+                "thumbnail_updated_at",
+                self._resolve_thumbnail_updated_at(
+                    project_id=project_id,
+                    page_number=int(page.page_number),
+                ),
+            )
         return project
 
     async def update_project(self, project_id: str, payload: ProjectUpdate) -> Project:
@@ -122,6 +136,7 @@ class ProjectService:
             ) from exc
 
         logger.info("Updated project {}", project_id)
+        self._attach_thumbnail_metadata(project)
         return project
 
     async def save_outline(self, project_id: str, outline: OutlineSchema | dict[str, object]) -> Project:
@@ -141,6 +156,7 @@ class ProjectService:
             ) from exc
 
         logger.info("Saved outline for project {}", project_id)
+        self._attach_thumbnail_metadata(project)
         return project
 
     async def save_theme_config(
@@ -164,6 +180,7 @@ class ProjectService:
             ) from exc
 
         logger.info("Saved theme config for project {}", project_id)
+        self._attach_thumbnail_metadata(project)
         return project
 
     async def delete_project(self, project_id: str) -> None:
@@ -250,3 +267,19 @@ class ProjectService:
         project_dir = self._validated_project_dir(project_id)
         if project_dir.exists():
             shutil.rmtree(project_dir)
+
+    def _attach_thumbnail_metadata(self, project: Project) -> None:
+        setattr(
+            project,
+            "first_thumbnail_updated_at",
+            self._resolve_thumbnail_updated_at(project_id=project.id, page_number=1),
+        )
+
+    def _resolve_thumbnail_updated_at(self, *, project_id: str, page_number: int) -> datetime | None:
+        thumbnail_path = self.settings.project_dir(project_id) / "thumbnails" / f"page-{page_number}.png"
+        try:
+            stat_result = thumbnail_path.stat()
+        except OSError:
+            return None
+
+        return datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc)

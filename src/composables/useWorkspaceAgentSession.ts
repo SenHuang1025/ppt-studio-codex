@@ -195,6 +195,7 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
   agentClient.onAssistantMessage(handleAssistantMessageEvent)
   agentClient.onError(handleAgentErrorEvent)
   agentClient.onDone(handleAgentDone)
+  agentClient.onReconnect(handleAgentReconnect)
   agentClient.onEvent((event) => {
     pushAgentEventLog(event)
   })
@@ -517,6 +518,15 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
       syncGenerationProgressTimelineItem(generationProgress.value)
     }
     appendStatusTimelineItem('会话异常', payload.message, 'error')
+  }
+
+  function handleAgentReconnect(attempt: number): void {
+    agentConnectionState.value = 'reconnecting'
+    appendStatusTimelineItem(
+      '连接恢复中',
+      `实时连接意外断开，正在尝试第 ${attempt} 次恢复，不会重复提交当前请求。`,
+      'warning'
+    )
   }
 
   function handleAgentDone(): void {

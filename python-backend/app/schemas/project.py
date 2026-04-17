@@ -75,6 +75,7 @@ class ProjectResponse(ORMModel):
     description: str | None = None
     status: ProjectStatus
     theme_config: ThemeConfig | None = None
+    first_thumbnail_updated_at: datetime | None = None
     total_pages: int
     created_at: datetime
     updated_at: datetime
@@ -88,6 +89,7 @@ class PageResponse(ORMModel):
     page_type: str | None = None
     vue_code: str | None = None
     status: PageStatus
+    thumbnail_updated_at: datetime | None = None
     version: int
     chat_message_count: int = 0
     created_at: datetime

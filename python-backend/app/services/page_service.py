@@ -13,6 +13,8 @@ from app.config import Settings
 from app.models import ChatMessage, PageVersion, Project, ProjectPage
 from app.models.enums import PageStatus
 from app.schemas.project import OutlinePageSchema
+from app.services.theme_service import ThemeService
+from app.services.thumbnail_service import ThumbnailPageSnapshot, ThumbnailProjectSnapshot, ThumbnailService
 
 
 class PageServiceError(Exception):
@@ -515,6 +517,58 @@ class PageService:
             raise PreviewSlideWriteError(
                 f"Failed to synchronize preview slides for project '{project_id}'."
             ) from exc
+
+    async def refresh_project_thumbnails(
+        self,
+        *,
+        project_id: str,
+        thumbnail_service: ThumbnailService,
+        page_numbers: list[int] | None = None,
+    ) -> list[Path]:
+        snapshot = await self.build_thumbnail_snapshot(project_id=project_id)
+        return await thumbnail_service.ensure_project_thumbnails(
+            snapshot=snapshot,
+            page_numbers=page_numbers,
+            cleanup_stale=True,
+        )
+
+    async def schedule_project_thumbnail_refresh(
+        self,
+        *,
+        project_id: str,
+        thumbnail_service: ThumbnailService,
+        page_numbers: list[int] | None = None,
+    ) -> None:
+        snapshot = await self.build_thumbnail_snapshot(project_id=project_id)
+        expected_page_numbers = [page.page_number for page in snapshot.pages]
+        thumbnail_service.schedule_refresh_from_preview(
+            project_id=project_id,
+            page_numbers=page_numbers or expected_page_numbers,
+            expected_page_numbers=expected_page_numbers,
+        )
+
+    async def build_thumbnail_snapshot(self, *, project_id: str) -> ThumbnailProjectSnapshot:
+        project_stmt: Select[tuple[Project]] = select(Project).where(Project.id == project_id)
+        project = (await self.session.execute(project_stmt)).scalar_one_or_none()
+        if project is None:
+            raise PageMutationValidationError(f"Project '{project_id}' was not found.")
+
+        page_stmt: Select[tuple[ProjectPage]] = (
+            select(ProjectPage)
+            .where(ProjectPage.project_id == project_id)
+            .order_by(ProjectPage.page_number.asc())
+        )
+        pages = list((await self.session.execute(page_stmt)).scalars().all())
+        theme = ThemeService(settings=self.settings).resolve_theme(project.theme_config)
+        pages = tuple(
+            ThumbnailPageSnapshot(
+                page_number=int(page.page_number),
+                vue_code=str(page.vue_code or ""),
+            )
+            for page in pages
+            if str(page.vue_code or "").strip()
+        )
+        return ThumbnailProjectSnapshot(project_id=project_id, theme=theme, pages=pages)
 
     def _append_version_snapshot(
         self,

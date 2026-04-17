@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -25,6 +26,14 @@ class UnsupportedLLMProviderError(LLMConfigurationError):
 
 class LLMInvocationError(RuntimeError):
     """Raised when a model invocation returns an unusable response."""
+
+
+class InvalidAPIKeyError(LLMInvocationError):
+    """Raised when the configured API key is rejected by the upstream provider."""
+
+
+class LLMRenderValidationError(LLMInvocationError):
+    """Raised when generated Vue code still cannot be rendered after local validation."""
 
 
 class SettingsReader(Protocol):
@@ -106,6 +115,47 @@ def _create_anthropic_chat_model(config: LLMRuntimeConfig) -> Any:
 
 
 async def invoke_model_text(model: Any, messages: Any) -> str:
+    return await invoke_model_text_with_retry(model, messages)
+
+
+async def invoke_model_text_with_retry(
+    model: Any,
+    messages: Any,
+    *,
+    retries: int = 3,
+    base_delay_seconds: float = 0.35,
+    on_retry: Callable[[int, Exception], Any] | None = None,
+) -> str:
+    attempts = max(1, retries)
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await _invoke_model_text_once(model, messages)
+        except Exception as exc:
+            normalized_error = normalize_llm_error(exc)
+            last_error = normalized_error
+
+            if isinstance(normalized_error, InvalidAPIKeyError):
+                raise normalized_error
+
+            if attempt >= attempts:
+                break
+
+            if on_retry is not None:
+                maybe_result = on_retry(attempt, normalized_error)
+                if asyncio.iscoroutine(maybe_result):
+                    await maybe_result
+
+            await asyncio.sleep(base_delay_seconds * attempt)
+
+    if last_error is not None:
+        raise last_error
+
+    raise LLMInvocationError("LLM 调用失败，请稍后重试。")
+
+
+async def _invoke_model_text_once(model: Any, messages: Any) -> str:
     if hasattr(model, "ainvoke"):
         response = await model.ainvoke(messages)
     elif hasattr(model, "invoke"):
@@ -118,6 +168,37 @@ async def invoke_model_text(model: Any, messages: Any) -> str:
         raise LLMInvocationError("Model returned an empty response.")
 
     return text
+
+
+def normalize_llm_error(error: Exception) -> Exception:
+    if isinstance(error, (InvalidAPIKeyError, LLMInvocationError)):
+        return error
+
+    error_message = str(error).strip()
+    normalized_message = error_message.lower()
+    if _is_invalid_api_key_error_message(normalized_message):
+        return InvalidAPIKeyError("API Key 无效或已过期，请前往设置页更新后重试。")
+
+    friendly_message = error_message or error.__class__.__name__
+    return LLMInvocationError(f"LLM 调用失败，请稍后重试。详情：{friendly_message}")
+
+
+def _is_invalid_api_key_error_message(message: str) -> bool:
+    return any(
+        token in message
+        for token in (
+            "invalid api key",
+            "incorrect api key",
+            "api key invalid",
+            "authentication error",
+            "invalid x-api-key",
+            "401",
+            "unauthorized",
+            "permission denied",
+            "invalid_api_key",
+            "expired api key",
+        )
+    )
 
 
 def extract_text_content(response: Any) -> str:

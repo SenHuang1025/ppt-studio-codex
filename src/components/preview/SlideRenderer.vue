@@ -18,6 +18,7 @@ const SLIDE_WIDTH = 1920
 const SLIDE_HEIGHT = 1080
 const LOAD_TIMEOUT_MS = 6000
 const SCROLL_SNAPSHOT_TIMEOUT_MS = 180
+const MAX_AUTO_RETRY_COUNT = 2
 const PREVIEW_IFRAME_MESSAGE_SOURCE = 'ppt-studio-preview-frame'
 const PREVIEW_IFRAME_MESSAGE_TARGET = 'ppt-studio-host'
 
@@ -25,6 +26,7 @@ const props = withDefaults(defineProps<{
   currentGenerationStageLabel?: string | null
   generationActive?: boolean
   generationActivePageNumber?: number | null
+  presenter?: boolean
   pageNumber: number
   pageStatus: PreviewPageStatus
   pageTitle: string
@@ -34,6 +36,7 @@ const props = withDefaults(defineProps<{
   currentGenerationStageLabel: null,
   generationActive: false,
   generationActivePageNumber: null,
+  presenter: false,
   previewOverrideCode: null,
   refreshToken: '0'
 })
@@ -66,6 +69,8 @@ let loadSequence = 0
 let loadTimeoutId: number | null = null
 let frameSequence = 0
 let scrollRequestSequence = 0
+let autoRetryCount = 0
+let autoRetryTimerId: number | null = null
 const pendingScrollResolvers = new Map<string, (snapshot: IframeScrollSnapshot | null) => void>()
 
 const scale = computed<number>(() => {
@@ -180,6 +185,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
   clearLoadTimeout()
+  clearAutoRetryTimer()
   resolvePendingScrollRequests()
 })
 
@@ -201,6 +207,7 @@ async function handleLoadingFrameLoad(): Promise<void> {
 }
 
 function handleRetry(): void {
+  autoRetryCount = 0
   void loadCurrentSlide(true)
 }
 
@@ -208,6 +215,7 @@ async function loadCurrentSlide(forceRefresh: boolean): Promise<void> {
   loadSequence += 1
   const currentLoadId = loadSequence
   clearLoadTimeout()
+  clearAutoRetryTimer()
   errorMessage.value = null
   errorKind.value = null
 
@@ -245,6 +253,7 @@ async function loadCurrentSlide(forceRefresh: boolean): Promise<void> {
       errorKind.value = 'slide-load-failed'
       rendererState.value = 'error'
       errorMessage.value = '预览加载超时，请刷新当前页，或确认 preview server 仍在运行。'
+      scheduleAutoRetry()
     }, LOAD_TIMEOUT_MS)
   } catch (error: unknown) {
     if (currentLoadId !== loadSequence) {
@@ -255,6 +264,7 @@ async function loadCurrentSlide(forceRefresh: boolean): Promise<void> {
     errorKind.value = 'server-unavailable'
     rendererState.value = 'error'
     errorMessage.value = resolvePreviewError(error, errorKind.value)
+    scheduleAutoRetry()
   }
 }
 
@@ -271,6 +281,27 @@ function clearLoadTimeout(): void {
 
   window.clearTimeout(loadTimeoutId)
   loadTimeoutId = null
+}
+
+function scheduleAutoRetry(): void {
+  if (autoRetryCount >= MAX_AUTO_RETRY_COUNT) {
+    return
+  }
+
+  autoRetryCount += 1
+  autoRetryTimerId = window.setTimeout(() => {
+    autoRetryTimerId = null
+    void loadCurrentSlide(true)
+  }, 900 * autoRetryCount)
+}
+
+function clearAutoRetryTimer(): void {
+  if (autoRetryTimerId === null) {
+    return
+  }
+
+  window.clearTimeout(autoRetryTimerId)
+  autoRetryTimerId = null
 }
 
 function resolvePreviewError(error: unknown, kind: SlideRendererErrorKind | null): string {
@@ -389,10 +420,18 @@ function isIframeScrollSnapshot(value: unknown): value is IframeScrollSnapshot {
 </script>
 
 <template>
-  <div class="grid flex-1 place-items-center rounded-[var(--radius-2xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-preview-stage)] p-5 md:p-8">
+  <div
+    class="grid flex-1 place-items-center"
+    :class="presenter
+      ? 'h-full min-h-0 bg-black p-0'
+      : 'rounded-[var(--radius-2xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-preview-stage)] p-5 md:p-8'"
+  >
     <div
       ref="containerRef"
-      class="relative h-full min-h-[360px] w-full overflow-hidden rounded-[var(--radius-2xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-canvas)]"
+      class="relative h-full w-full overflow-hidden"
+      :class="presenter
+        ? 'min-h-0 bg-black'
+        : 'min-h-[360px] rounded-[var(--radius-2xl)] border border-[color:var(--app-border-subtle)] bg-[color:var(--surface-canvas)]'"
     >
       <div
         v-if="rendererState === 'idle'"
@@ -407,9 +446,14 @@ function isIframeScrollSnapshot(value: unknown): value is IframeScrollSnapshot {
         </div>
       </div>
 
-      <div v-else-if="shouldShowFrame" class="absolute inset-0 flex items-center justify-center p-5">
+      <div
+        v-else-if="shouldShowFrame"
+        class="absolute inset-0 flex items-center justify-center"
+        :class="presenter ? 'p-0' : 'p-5'"
+      >
         <div
-          class="relative overflow-hidden rounded-[28px] bg-white shadow-[var(--shadow-canvas)]"
+          class="relative overflow-hidden bg-white"
+          :class="presenter ? '' : 'rounded-[28px] shadow-[var(--shadow-canvas)]'"
           :style="frameBoxStyle"
         >
           <iframe

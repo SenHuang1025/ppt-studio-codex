@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.agents.llm import invoke_model_text
+from loguru import logger
+
+from app.agents.llm import LLMRenderValidationError, invoke_model_text_with_retry
 from app.agents.prompts.page_generator_prompt import (
     build_page_generator_critic_messages,
     build_page_generator_draft_messages,
@@ -20,6 +22,10 @@ class PageGenerationError(RuntimeError):
 
 class PageGenerationValidationError(PageGenerationError):
     """Raised when a generated Vue SFC does not satisfy baseline constraints."""
+
+
+class PageRenderingValidationError(PageGenerationValidationError):
+    """Raised when generated Vue SFC is likely to fail at runtime rendering."""
 
 
 async def generate_page_code(
@@ -70,6 +76,7 @@ async def generate_page_code(
     draft_code = await _generate_page_draft(
         generation_context=generation_context,
         model=model,
+        sse_callback=sse_callback,
     )
     final_code = draft_code
 
@@ -96,6 +103,7 @@ async def generate_page_code(
                 generation_context=generation_context,
                 draft_page_code=draft_code,
                 model=model,
+                sse_callback=sse_callback,
             )
             if sse_callback is not None:
                 await sse_callback(
@@ -112,6 +120,7 @@ async def generate_page_code(
                 draft_page_code=draft_code,
                 critic_feedback=critic_feedback,
                 model=model,
+                sse_callback=sse_callback,
             )
             final_code = synthesized_code
             if sse_callback is not None:
@@ -160,13 +169,16 @@ async def critique_page_code(
     generation_context: dict[str, Any],
     draft_page_code: str,
     model: Any,
+    sse_callback: Any | None = None,
 ) -> str:
-    return await invoke_model_text(
+    return await _invoke_model_with_status(
         model,
         build_page_generator_critic_messages(
             generation_context=generation_context,
             draft_page_code=draft_page_code,
         ),
+        stage_label="正在请求页面评审意见...",
+        sse_callback=sse_callback,
     )
 
 
@@ -176,6 +188,7 @@ async def synthesize_page_code(
     draft_page_code: str,
     critic_feedback: str,
     model: Any,
+    sse_callback: Any | None = None,
 ) -> str:
     return await _generate_validated_page_code(
         generation_context=generation_context,
@@ -185,6 +198,7 @@ async def synthesize_page_code(
             draft_page_code=draft_page_code,
             critic_feedback=critic_feedback,
         ),
+        sse_callback=sse_callback,
     )
 
 
@@ -222,11 +236,13 @@ async def _generate_page_draft(
     *,
     generation_context: dict[str, Any],
     model: Any,
+    sse_callback: Any | None = None,
 ) -> str:
     return await _generate_validated_page_code(
         generation_context=generation_context,
         model=model,
         primary_messages=build_page_generator_draft_messages(generation_context=generation_context),
+        sse_callback=sse_callback,
     )
 
 
@@ -235,19 +251,27 @@ async def _generate_validated_page_code(
     generation_context: dict[str, Any],
     model: Any,
     primary_messages: list[tuple[str, str]],
+    sse_callback: Any | None = None,
 ) -> str:
     response_text = ""
     try:
-        response_text = await invoke_model_text(model, primary_messages)
+        response_text = await _invoke_model_with_status(
+            model,
+            primary_messages,
+            stage_label="正在请求页面代码...",
+            sse_callback=sse_callback,
+        )
         return normalize_vue_sfc_output(response_text)
     except Exception as initial_error:
-        repaired_text = await invoke_model_text(
+        repaired_text = await _invoke_model_with_status(
             model,
             build_page_generator_repair_messages(
                 generation_context=generation_context,
                 invalid_output=response_text or "<page generation failed>",
                 validation_error=str(initial_error),
             ),
+            stage_label="检测到页面代码可能无法渲染，正在自动修复一次...",
+            sse_callback=sse_callback,
         )
         return normalize_vue_sfc_output(repaired_text)
 
@@ -255,6 +279,7 @@ async def _generate_validated_page_code(
 def normalize_vue_sfc_output(raw_output: str) -> str:
     sfc_code = extract_vue_sfc(raw_output)
     validate_vue_sfc(sfc_code)
+    validate_runtime_renderability(sfc_code)
     return sfc_code
 
 
@@ -301,6 +326,53 @@ def validate_vue_sfc(vue_code: str) -> None:
         raise PageGenerationValidationError(
             f"Generated Vue SFC is missing required sections: {', '.join(missing_sections)}."
         )
+
+
+def validate_runtime_renderability(vue_code: str) -> None:
+    if "{{{" in vue_code or "}}}" in vue_code:
+        raise PageRenderingValidationError("Generated Vue SFC contains malformed interpolation syntax.")
+
+    template_open_count = len(re.findall(r"<template\b", vue_code, flags=re.IGNORECASE))
+    template_close_count = len(re.findall(r"</template>", vue_code, flags=re.IGNORECASE))
+    if template_open_count != template_close_count:
+        raise PageRenderingValidationError("Generated Vue SFC template block is not balanced.")
+
+    script_open_count = len(re.findall(r"<script\b", vue_code, flags=re.IGNORECASE))
+    script_close_count = len(re.findall(r"</script>", vue_code, flags=re.IGNORECASE))
+    if script_open_count != script_close_count:
+        raise PageRenderingValidationError("Generated Vue SFC script block is not balanced.")
+
+    # Basic runtime guard against unmatched mustache braces that often break preview rendering.
+    if vue_code.count("{{") != vue_code.count("}}"):
+        raise PageRenderingValidationError("Generated Vue SFC contains unmatched template expressions.")
+
+
+async def _invoke_model_with_status(
+    model: Any,
+    messages: list[tuple[str, str]],
+    *,
+    stage_label: str,
+    sse_callback: Any | None = None,
+) -> str:
+    async def handle_retry(attempt: int, error: Exception) -> None:
+        logger.warning("LLM invocation retry attempt {} failed: {}", attempt, error)
+        if sse_callback is None:
+            return
+
+        await sse_callback(
+            "thinking",
+            {
+                "agent": "page_generator",
+                "content": f"{stage_label} 第 {attempt + 1} 次尝试中...",
+            },
+        )
+
+    return await invoke_model_text_with_retry(
+        model,
+        messages,
+        retries=3,
+        on_retry=handle_retry,
+    )
 
 
 def summarize_page_code(*, normalized_page: OutlinePageSchema, page_code: str) -> str:

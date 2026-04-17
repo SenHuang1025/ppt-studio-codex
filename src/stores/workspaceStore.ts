@@ -66,6 +66,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const chatMessagesLoaded = ref(false)
   const chatMessagesError = ref<string | null>(null)
   const previewProjectChatExpanded = ref(false)
+  const previewFullscreenActive = ref(false)
   const pageChatMessages = ref<Record<number, ChatMessage[]>>({})
   const pageChatMessagesLoading = ref<Record<number, boolean>>({})
   const pageChatMessagesLoaded = ref<Record<number, boolean>>({})
@@ -112,6 +113,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       projectLoaded.value = false
       projectError.value = null
       previewProjectChatExpanded.value = false
+      previewFullscreenActive.value = false
       previewThemeSyncError.value = null
       themeApplyingId.value = null
       lastPreviewThemeSyncKey = null
@@ -186,10 +188,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function setMode(mode: WorkspaceMode): void {
     currentMode.value = mode
+
+    if (mode !== 'preview') {
+      previewFullscreenActive.value = false
+    }
   }
 
   function setPreviewProjectChatExpanded(expanded: boolean): void {
     previewProjectChatExpanded.value = expanded
+  }
+
+  function setPreviewFullscreenActive(active: boolean): void {
+    previewFullscreenActive.value = active
   }
 
   function setPreviewPage(pageNumber: number): void {
@@ -563,6 +573,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     projectLoaded.value = false
     projectError.value = null
     previewProjectChatExpanded.value = false
+    previewFullscreenActive.value = false
     previewThemeSyncing.value = false
     previewThemeSyncError.value = null
     themeApplyingId.value = null
@@ -646,6 +657,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     pageChatMessagesError,
     pageChatMessagesLoaded,
     pageChatMessagesLoading,
+    previewFullscreenActive,
     previewProjectChatExpanded,
     activePreviewThemeId,
     applyTheme,
@@ -671,6 +683,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     resetPageChatMessageState,
     resetWorkspace,
     setMode,
+    setPreviewFullscreenActive,
     setPreviewPage,
     setPreviewProjectChatExpanded,
     syncPreviewTheme,

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { NDropdown, type DropdownOption } from 'naive-ui'
 import LinearProgressGlow from '@/components/common/LinearProgressGlow.vue'
+import { buildPageThumbnailUrl } from '@/services/thumbnailService'
 import type { PreviewPageItem } from '@/types/preview'
 import { formatPreviewPageType, getPreviewPageStatusLabel } from '@/utils/preview'
 
@@ -49,6 +50,12 @@ const messageCountLabel = computed<string>(() => `${props.item.chatMessageCount}
 const summaryLabel = computed<string>(() => props.item.contentBrief || props.item.layout || '等待当前页内容写入')
 const isCurrentGeneratingPage = computed<boolean>(() =>
   props.item.status === 'generating' && props.currentGeneratingPageNumber === props.item.pageNumber
+)
+const thumbnailLoadFailed = ref(false)
+const thumbnailUrl = ref<string | null>(null)
+const thumbnailSignature = computed<string | null>(() => props.item.thumbnailSignature)
+const showRealThumbnail = computed<boolean>(() =>
+  Boolean(thumbnailUrl.value && props.item.hasGeneratedCode && !thumbnailLoadFailed.value)
 )
 
 const statusClass = computed<string>(() => {
@@ -123,6 +130,30 @@ const progressValue = computed<number>(() => {
   }
 })
 
+watch(
+  [() => props.item.generatedPage?.project_id, () => props.item.pageNumber, thumbnailSignature],
+  async ([projectId, pageNumber, signature]) => {
+    thumbnailLoadFailed.value = false
+
+    if (!projectId || !props.item.hasGeneratedCode || !signature) {
+      thumbnailUrl.value = null
+      return
+    }
+
+    try {
+      thumbnailUrl.value = await buildPageThumbnailUrl({
+        pageNumber,
+        projectId,
+        signature
+      })
+    } catch {
+      thumbnailUrl.value = null
+      thumbnailLoadFailed.value = true
+    }
+  },
+  { immediate: true }
+)
+
 function handleMenuSelect(key: string | number): void {
   switch (key as ThumbnailMenuKey) {
     case 'delete':
@@ -138,6 +169,10 @@ function handleMenuSelect(key: string | number): void {
       emit('insertPageAfter', props.item.pageNumber)
       return
   }
+}
+
+function handleThumbnailError(): void {
+  thumbnailLoadFailed.value = true
 }
 </script>
 
@@ -190,6 +225,13 @@ function handleMenuSelect(key: string | number): void {
       @click="emit('select', item.pageNumber)"
     >
       <div v-if="item.status === 'generating'" class="thumbnail-generating-sheen absolute inset-y-0 left-[-32%] w-1/3" />
+      <img
+        v-if="showRealThumbnail && thumbnailUrl"
+        :alt="`${item.title} 缩略图`"
+        class="absolute inset-0 h-full w-full object-cover"
+        :src="thumbnailUrl"
+        @error="handleThumbnailError"
+      >
       <div class="absolute inset-x-3 top-3">
         <LinearProgressGlow
           :animated="item.status === 'generating'"
@@ -197,7 +239,10 @@ function handleMenuSelect(key: string | number): void {
           :value="progressValue"
         />
       </div>
-      <div class="flex h-full flex-col justify-between rounded-[calc(var(--radius-lg)-6px)] border border-dashed border-[rgba(131,53,0,0.1)] p-3">
+      <div
+        v-if="!showRealThumbnail"
+        class="flex h-full flex-col justify-between rounded-[calc(var(--radius-lg)-6px)] border border-dashed border-[rgba(131,53,0,0.1)] p-3"
+      >
         <div class="flex items-center justify-between gap-3">
           <div class="h-2.5 w-14 rounded-full bg-[rgba(131,53,0,0.12)]" />
           <div class="mono-meta text-[10px] text-[color:var(--app-text-tertiary)]">
@@ -222,6 +267,13 @@ function handleMenuSelect(key: string | number): void {
             </div>
           </div>
         </div>
+      </div>
+      <div
+        v-else
+        class="pointer-events-none absolute inset-x-2 bottom-2 flex items-center justify-between rounded-[var(--radius-md)] border border-[rgba(255,255,255,0.42)] bg-[rgba(28,23,16,0.42)] px-2 py-1 text-[10px] text-white shadow-[0_8px_18px_rgba(36,24,10,0.16)]"
+      >
+        <span class="mono-meta">第 {{ item.pageNumber }} 页</span>
+        <span>{{ versionLabel }}</span>
       </div>
     </button>
   </div>

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.agents.llm import invoke_model_text
+from loguru import logger
+
+from app.agents.llm import invoke_model_text_with_retry
 from app.agents.page_generator import normalize_vue_sfc_output
 from app.agents.prompts.page_optimizer_prompt import (
     build_page_optimizer_change_summary_messages,
@@ -15,6 +17,7 @@ from app.agents.state import ProjectState
 from app.models.enums import PageStatus
 from app.schemas.project import OutlinePageSchema
 from app.schemas.theme import ThemeConfig
+from app.services.thumbnail_service import ThumbnailService
 
 
 class PageOptimizationError(RuntimeError):
@@ -70,6 +73,7 @@ async def optimize_page_code(
     draft_code = await _generate_page_optimization_draft(
         optimization_context=optimization_context,
         model=model,
+        sse_callback=sse_callback,
     )
     final_code = draft_code
 
@@ -100,6 +104,7 @@ async def optimize_page_code(
                 optimization_context=optimization_context,
                 draft_page_code=draft_code,
                 model=model,
+                sse_callback=sse_callback,
             )
             if sse_callback is not None:
                 await sse_callback(
@@ -116,6 +121,7 @@ async def optimize_page_code(
                 draft_page_code=draft_code,
                 critic_feedback=critic_feedback,
                 model=model,
+                sse_callback=sse_callback,
             )
             if sse_callback is not None:
                 await sse_callback(
@@ -194,6 +200,17 @@ async def page_optimizer_node(
         vue_code=optimized_code,
         change_description=change_description,
     )
+    try:
+        await ThumbnailService(settings=page_service.settings).refresh_from_preview(
+            project_id=state["project_id"],
+            page_numbers=[page_number],
+        )
+    except Exception:
+        logger.exception(
+            "Failed to refresh thumbnail for project {} page {}",
+            state["project_id"],
+            page_number,
+        )
 
     page_payload = {
         "id": getattr(updated_page, "id", None),
@@ -243,13 +260,16 @@ async def critique_optimized_page(
     optimization_context: dict[str, Any],
     draft_page_code: str,
     model: Any,
+    sse_callback: Any | None = None,
 ) -> str:
-    return await invoke_model_text(
+    return await _invoke_model_with_status(
         model,
         build_page_optimizer_critic_messages(
             optimization_context=optimization_context,
             draft_page_code=draft_page_code,
         ),
+        stage_label="正在请求页面优化评审意见...",
+        sse_callback=sse_callback,
     )
 
 
@@ -259,6 +279,7 @@ async def synthesize_optimized_page(
     draft_page_code: str,
     critic_feedback: str,
     model: Any,
+    sse_callback: Any | None = None,
 ) -> str:
     return await _generate_validated_optimized_page_code(
         optimization_context=optimization_context,
@@ -268,6 +289,7 @@ async def synthesize_optimized_page(
             draft_page_code=draft_page_code,
             critic_feedback=critic_feedback,
         ),
+        sse_callback=sse_callback,
     )
 
 
@@ -279,7 +301,7 @@ async def generate_change_description(
     fallback_instruction: str,
 ) -> str:
     try:
-        response_text = await invoke_model_text(
+        response_text = await invoke_model_text_with_retry(
             model,
             build_page_optimizer_change_summary_messages(
                 optimization_context=optimization_context,
@@ -340,11 +362,13 @@ async def _generate_page_optimization_draft(
     *,
     optimization_context: dict[str, Any],
     model: Any,
+    sse_callback: Any | None = None,
 ) -> str:
     return await _generate_validated_optimized_page_code(
         optimization_context=optimization_context,
         model=model,
         primary_messages=build_page_optimizer_draft_messages(optimization_context=optimization_context),
+        sse_callback=sse_callback,
     )
 
 
@@ -353,21 +377,57 @@ async def _generate_validated_optimized_page_code(
     optimization_context: dict[str, Any],
     model: Any,
     primary_messages: list[tuple[str, str]],
+    sse_callback: Any | None = None,
 ) -> str:
     response_text = ""
     try:
-        response_text = await invoke_model_text(model, primary_messages)
+        response_text = await _invoke_model_with_status(
+            model,
+            primary_messages,
+            stage_label="正在请求页面优化代码...",
+            sse_callback=sse_callback,
+        )
         return normalize_vue_sfc_output(response_text)
     except Exception as initial_error:
-        repaired_text = await invoke_model_text(
+        repaired_text = await _invoke_model_with_status(
             model,
             build_page_optimizer_repair_messages(
                 optimization_context=optimization_context,
                 invalid_output=response_text or "<page optimization failed>",
                 validation_error=str(initial_error),
             ),
+            stage_label="检测到优化后代码可能无法渲染，正在自动修复一次...",
+            sse_callback=sse_callback,
         )
         return normalize_vue_sfc_output(repaired_text)
+
+
+async def _invoke_model_with_status(
+    model: Any,
+    messages: list[tuple[str, str]],
+    *,
+    stage_label: str,
+    sse_callback: Any | None = None,
+) -> str:
+    async def handle_retry(attempt: int, error: Exception) -> None:
+        logger.warning("Page optimizer LLM invocation retry attempt {} failed: {}", attempt, error)
+        if sse_callback is None:
+            return
+
+        await sse_callback(
+            "thinking",
+            {
+                "agent": "page_optimizer",
+                "content": f"{stage_label} 第 {attempt + 1} 次尝试中...",
+            },
+        )
+
+    return await invoke_model_text_with_retry(
+        model,
+        messages,
+        retries=3,
+        on_retry=handle_retry,
+    )
 
 
 def summarize_optimized_page(*, page_number: int, title: str, user_instruction: str) -> str:

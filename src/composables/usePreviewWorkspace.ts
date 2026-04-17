@@ -75,6 +75,7 @@ export function usePreviewWorkspace(options: UsePreviewWorkspaceOptions) {
           projectStatus: options.workspaceStore.project?.status,
           realtimeState: realtimeState ?? null
         }),
+        thumbnailSignature: buildThumbnailSignature(generatedPage),
         title: resolvePreviewPageTitle({
           generatedPage,
           outlinePageTitle: outlinePage?.title,
@@ -210,4 +211,15 @@ export function usePreviewWorkspace(options: UsePreviewWorkspaceOptions) {
     goToPreviousPage,
     totalPreviewPages
   }
+}
+
+function buildThumbnailSignature(generatedPage: ProjectPage | null): string | null {
+  if (!generatedPage) {
+    return null
+  }
+
+  return [
+    generatedPage.version,
+    generatedPage.thumbnail_updated_at || generatedPage.updated_at
+  ].join(':')
 }

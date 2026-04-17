@@ -5,11 +5,12 @@ from collections.abc import AsyncGenerator
 from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import FileResponse
 from loguru import logger
 from sse_starlette import EventSourceResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.llm import API_KEY_HEADER, LLMConfigurationError, MissingAPIKeyError, build_llm_runtime
+from app.agents.llm import API_KEY_HEADER, InvalidAPIKeyError, LLMConfigurationError, MissingAPIKeyError, build_llm_runtime
 from app.agents.page_generator import generate_page_code
 from app.api.files import get_file_service
 from app.api.projects import get_project_service
@@ -42,6 +43,10 @@ from app.services import (
     SSEManager,
     SettingsService,
     ThemeService,
+    ThumbnailDependencyError,
+    ThumbnailNotFoundError,
+    ThumbnailRenderError,
+    ThumbnailService,
 )
 
 router = APIRouter(prefix="/api/projects/{project_id}/pages", tags=["pages"])
@@ -61,6 +66,17 @@ def get_sse_manager(request: Request) -> SSEManager:
     return sse_manager
 
 
+def get_thumbnail_service(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> ThumbnailService:
+    thumbnail_service = getattr(request.app.state, "thumbnail_service", None)
+    if not isinstance(thumbnail_service, ThumbnailService):
+        thumbnail_service = ThumbnailService(settings=settings)
+        request.app.state.thumbnail_service = thumbnail_service
+    return thumbnail_service
+
+
 def _raise_page_http_error(exc: Exception) -> NoReturn:
     if isinstance(exc, PageNotFoundError):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -70,9 +86,33 @@ def _raise_page_http_error(exc: Exception) -> NoReturn:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if isinstance(exc, (PageStorageError, PageServiceError, PreviewSlideWriteError)):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
-    if isinstance(exc, (MissingAPIKeyError, LLMConfigurationError)):
+    if isinstance(exc, ThumbnailNotFoundError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if isinstance(exc, (ThumbnailDependencyError, ThumbnailRenderError)):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    if isinstance(exc, (MissingAPIKeyError, InvalidAPIKeyError, LLMConfigurationError)):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     raise exc
+
+
+@router.get("/{page_number}/thumbnail")
+async def get_page_thumbnail(
+    project_id: str,
+    page_number: int,
+    thumbnail_service: ThumbnailService = Depends(get_thumbnail_service),
+) -> FileResponse:
+    try:
+        thumbnail_path = thumbnail_service.require_thumbnail_path(
+            project_id=project_id,
+            page_number=page_number,
+        )
+        return FileResponse(
+            path=thumbnail_path,
+            media_type="image/png",
+            filename=thumbnail_path.name,
+        )
+    except Exception as exc:
+        _raise_page_http_error(exc)
 
 
 @router.post("/{page_number}/confirm", response_model=PageResponse)
@@ -111,6 +151,7 @@ async def rollback_page(
     page_number: int,
     payload: PageRollbackRequest,
     page_service: PageService = Depends(get_page_service),
+    thumbnail_service: ThumbnailService = Depends(get_thumbnail_service),
 ) -> PageResponse:
     try:
         page = await page_service.rollback_page_to_version(
@@ -119,6 +160,11 @@ async def rollback_page(
             target_version=payload.version,
         )
         page_service.write_preview_slide(page_number=page_number, vue_code=str(page.vue_code or ""))
+        await _safe_refresh_page_thumbnail(
+            project_id=project_id,
+            page_numbers=[page_number],
+            thumbnail_service=thumbnail_service,
+        )
         return page
     except Exception as exc:
         _raise_page_http_error(exc)
@@ -153,9 +199,15 @@ async def delete_page(
     project_id: str,
     page_number: int,
     page_service: PageService = Depends(get_page_service),
+    thumbnail_service: ThumbnailService = Depends(get_thumbnail_service),
 ) -> PageMutationResponse:
     try:
         await page_service.delete_page(project_id=project_id, page_number=page_number)
+        await _safe_refresh_project_thumbnails(
+            project_id=project_id,
+            page_service=page_service,
+            thumbnail_service=thumbnail_service,
+        )
         return PageMutationResponse()
     except Exception as exc:
         _raise_page_http_error(exc)
@@ -166,9 +218,16 @@ async def duplicate_page(
     project_id: str,
     page_number: int,
     page_service: PageService = Depends(get_page_service),
+    thumbnail_service: ThumbnailService = Depends(get_thumbnail_service),
 ) -> PageResponse:
     try:
-        return await page_service.duplicate_page(project_id=project_id, page_number=page_number)
+        page = await page_service.duplicate_page(project_id=project_id, page_number=page_number)
+        await _safe_refresh_project_thumbnails(
+            project_id=project_id,
+            page_service=page_service,
+            thumbnail_service=thumbnail_service,
+        )
+        return page
     except Exception as exc:
         _raise_page_http_error(exc)
 
@@ -178,11 +237,17 @@ async def reorder_pages(
     project_id: str,
     payload: PageReorderRequest,
     page_service: PageService = Depends(get_page_service),
+    thumbnail_service: ThumbnailService = Depends(get_thumbnail_service),
 ) -> PageMutationResponse:
     try:
         await page_service.reorder_pages(
             project_id=project_id,
             ordered_page_numbers=payload.page_numbers,
+        )
+        await _safe_refresh_project_thumbnails(
+            project_id=project_id,
+            page_service=page_service,
+            thumbnail_service=thumbnail_service,
         )
         return PageMutationResponse()
     except Exception as exc:
@@ -200,6 +265,7 @@ async def insert_page_after(
     project_service: ProjectService = Depends(get_project_service),
     settings_service: SettingsService = Depends(get_settings_service),
     theme_service: ThemeService = Depends(get_theme_service),
+    thumbnail_service: ThumbnailService = Depends(get_thumbnail_service),
 ) -> PageResponse:
     api_key = request.headers.get(API_KEY_HEADER, "").strip()
 
@@ -235,13 +301,19 @@ async def insert_page_after(
             deliberation_enabled=llm_runtime.settings.multi_agent_deliberation_enabled,
             page_generation_context=page_generation_context,
         )
-        return await page_service.insert_generated_page_after(
+        page = await page_service.insert_generated_page_after(
             project_id=project_id,
             after_page_number=page_number,
             outline_page=outline,
             vue_code=page_code,
             change_description=f"插入新页：{_truncate_insert_description(payload.description)}",
         )
+        await _safe_refresh_project_thumbnails(
+            project_id=project_id,
+            page_service=page_service,
+            thumbnail_service=thumbnail_service,
+        )
+        return page
     except Exception as exc:
         _raise_page_http_error(exc)
 
@@ -258,8 +330,10 @@ async def generate_single_page(
     settings_service: SettingsService = Depends(get_settings_service),
     sse_manager: SSEManager = Depends(get_sse_manager),
     theme_service: ThemeService = Depends(get_theme_service),
+    thumbnail_service: ThumbnailService = Depends(get_thumbnail_service),
 ) -> EventSourceResponse:
     api_key = request.headers.get(API_KEY_HEADER, "").strip()
+    requested_stream_id = request.headers.get("x-ppt-studio-stream-id", "").strip() or None
 
     try:
         llm_runtime = await build_llm_runtime(
@@ -269,7 +343,11 @@ async def generate_single_page(
     except Exception as exc:
         _raise_page_http_error(exc)
 
-    stream_id, stream = await sse_manager.open_stream(project_id)
+    if requested_stream_id and await sse_manager.has_stream(project_id, stream_id=requested_stream_id):
+        stream_id = requested_stream_id
+        stream = await sse_manager.create_stream(project_id, stream_id=stream_id)
+    else:
+        stream_id, stream = await sse_manager.open_stream(project_id)
 
     async def stream_response() -> AsyncGenerator[object, None]:
         producer_task = asyncio.create_task(
@@ -283,13 +361,15 @@ async def generate_single_page(
                 sse_manager=sse_manager,
                 stream_id=stream_id,
                 theme_service=theme_service,
+                thumbnail_service=thumbnail_service,
             )
         )
+        await sse_manager.register_producer_task(project_id, stream_id=stream_id, producer_task=producer_task)
 
         try:
             async for event in stream:
                 if await request.is_disconnected():
-                    producer_task.cancel()
+                    await sse_manager.mark_client_disconnected(project_id, stream_id=stream_id)
                     break
 
                 yield event
@@ -302,9 +382,19 @@ async def generate_single_page(
             except asyncio.CancelledError:
                 pass
 
-            await sse_manager.close_stream(project_id, stream_id=stream_id)
+            if producer_task.done():
+                await sse_manager.close_stream(project_id, stream_id=stream_id)
 
-    return EventSourceResponse(stream_response(), ping=None)
+    return EventSourceResponse(stream_response(), ping=None, headers={"x-ppt-studio-stream-id": stream_id})
+
+
+@router.post("/streams/{stream_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)
+async def cancel_page_stream(
+    project_id: str,
+    stream_id: str,
+    sse_manager: SSEManager = Depends(get_sse_manager),
+) -> None:
+    await sse_manager.cancel_stream(project_id, stream_id=stream_id)
 
 
 async def _produce_page_generation_events(
@@ -318,6 +408,7 @@ async def _produce_page_generation_events(
     sse_manager: SSEManager,
     stream_id: str,
     theme_service: ThemeService,
+    thumbnail_service: ThumbnailService,
 ) -> None:
     cancelled = False
 
@@ -386,6 +477,11 @@ async def _produce_page_generation_events(
             title=outline_page.title,
             page_type=outline_page.type,
             vue_code=page_code,
+        )
+        await _safe_refresh_page_thumbnail(
+            project_id=project_id,
+            page_numbers=[page_number],
+            thumbnail_service=thumbnail_service,
         )
 
         await _safe_send_event(
@@ -575,3 +671,33 @@ async def _safe_send_event(
         await sse_manager.send_event(project_id, event, data, stream_id=stream_id)
     except Exception:
         logger.exception("Failed to send SSE event {} for project {}", event, project_id)
+
+
+async def _safe_refresh_page_thumbnail(
+    *,
+    project_id: str,
+    page_numbers: list[int],
+    thumbnail_service: ThumbnailService,
+) -> None:
+    try:
+        await thumbnail_service.refresh_from_preview(
+            project_id=project_id,
+            page_numbers=page_numbers,
+        )
+    except Exception:
+        logger.exception("Failed to refresh thumbnail for project {} pages {}", project_id, page_numbers)
+
+
+async def _safe_refresh_project_thumbnails(
+    *,
+    project_id: str,
+    page_service: PageService,
+    thumbnail_service: ThumbnailService,
+) -> None:
+    try:
+        await page_service.refresh_project_thumbnails(
+            project_id=project_id,
+            thumbnail_service=thumbnail_service,
+        )
+    except Exception:
+        logger.exception("Failed to refresh project thumbnails for project {}", project_id)

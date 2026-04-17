@@ -39,6 +39,7 @@ export interface ProjectPage {
   page_type: string | null
   project_id: string
   status: PageStatus
+  thumbnail_updated_at: string | null
   title: string | null
   updated_at: string
   version: number
@@ -69,6 +70,7 @@ export interface PageReorderPayload {
 export interface Project {
   created_at: string
   description: string | null
+  first_thumbnail_updated_at: string | null
   id: string
   name: string
   status: ProjectStatus

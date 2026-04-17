@@ -59,6 +59,11 @@ const connectionMeta = computed<{ label: string; toneClass: string }>(() => {
         label: '建立连接中',
         toneClass: 'border-[rgba(241,143,1,0.22)] bg-[rgba(241,143,1,0.12)] text-[color:var(--accent-200)]'
       }
+    case 'reconnecting':
+      return {
+        label: '恢复连接中',
+        toneClass: 'border-[rgba(241,143,1,0.22)] bg-[rgba(255,244,230,0.94)] text-[color:var(--accent-200)]'
+      }
     case 'streaming':
       return {
         label: 'Agent 处理中',

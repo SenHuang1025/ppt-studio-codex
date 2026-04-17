@@ -6,6 +6,7 @@ import LLMSettings from '@/components/settings/LLMSettings.vue'
 import StorageSettings from '@/components/settings/StorageSettings.vue'
 import ThemeSettings from '@/components/settings/ThemeSettings.vue'
 import GlassPanel from '@/components/common/GlassPanel.vue'
+import { notifyApiError, resolveAppErrorMessage } from '@/services/errorHandling'
 import { settingsService } from '@/services/settingsService'
 import type { AppTheme, LLMProvider, SettingsFormState, SettingsResponse } from '@/types/settings'
 
@@ -124,7 +125,9 @@ async function handleSave(): Promise<void> {
     applyLoadedSettings(savedSettings, persistedApiKey)
     message.success('设置已保存。')
   } catch (error: unknown) {
-    message.error(resolveErrorMessage(error))
+    notifyApiError(error, {
+      fallback: '设置读取或保存失败，请确认 Electron 与 Python Sidecar 已就绪。'
+    })
   } finally {
     saving.value = false
   }
@@ -147,11 +150,7 @@ function clearApiKeyInput(): void {
 }
 
 function resolveErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message.trim()
-  }
-
-  return '设置读取或保存失败，请确认 Electron 与 Python Sidecar 已就绪。'
+  return resolveAppErrorMessage(error, '设置读取或保存失败，请确认 Electron 与 Python Sidecar 已就绪。')
 }
 
 function updateProvider(value: LLMProvider): void {

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { NTag } from 'naive-ui'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { NButton, NTag } from 'naive-ui'
 import GlassPanel from '@/components/common/GlassPanel.vue'
+import ExportTaskPanel from '@/components/preview/ExportTaskPanel.vue'
+import FullscreenPresenter from '@/components/preview/FullscreenPresenter.vue'
 import GenerationProgressBanner from '@/components/preview/GenerationProgressBanner.vue'
 import PageOptimizeChat from '@/components/preview/PageOptimizeChat.vue'
 import PreviewProjectChatEntry from '@/components/preview/PreviewProjectChatEntry.vue'
@@ -12,6 +14,7 @@ import ThemePresetPicker from '@/components/preview/ThemePresetPicker.vue'
 import ThumbnailNav from '@/components/preview/ThumbnailNav.vue'
 import VersionHistoryDrawer from '@/components/preview/VersionHistoryDrawer.vue'
 import type { AgentConnectionState, AgentEventLogItem, ChatTimelineItem } from '@/types/chat'
+import type { ProjectExportTask } from '@/types/export'
 import type { PageVersion } from '@/types/project'
 import type {
   PreviewPageItem,
@@ -32,6 +35,9 @@ const props = withDefaults(defineProps<{
   activeThemeId: string
   activeOptimizingPageNumber?: number | null
   applyingThemeId?: string | null
+  exportStarting?: boolean
+  exportTask?: ProjectExportTask | null
+  fullscreenActive?: boolean
   optimizeChatConnectionState?: AgentConnectionState
   optimizeCurrentActionLabel?: string | null
   optimizeChatDebugEvents?: AgentEventLogItem[]
@@ -64,6 +70,9 @@ const props = withDefaults(defineProps<{
 }>(), {
   activeOptimizingPageNumber: null,
   applyingThemeId: null,
+  exportStarting: false,
+  exportTask: null,
+  fullscreenActive: false,
   optimizeChatConnectionState: 'idle',
   optimizeCurrentActionLabel: null,
   optimizeChatDebugEvents: () => [],
@@ -94,7 +103,11 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   applyTheme: [theme: ThemeConfig]
   deletePage: [pageNumber: number]
+  downloadExportArtifact: []
   duplicatePage: [pageNumber: number]
+  enterFullscreen: []
+  exitFullscreen: []
+  fullscreenError: [message: string]
   insertPageAfter: [pageNumber: number]
   nextPage: []
   openChatMode: []
@@ -111,12 +124,14 @@ const emit = defineEmits<{
   retryTheme: []
   selectPage: [pageNumber: number]
   showPageVersionHistory: [pageNumber: number]
+  startExportPdf: []
   'update:projectChatExpanded': [value: boolean]
   'update:versionDrawerShow': [value: boolean]
   'update:optimizeChatDraft': [value: string]
 }>()
 
 const rendererManualRefreshTick = ref(0)
+const fullscreenPresenterRef = ref<InstanceType<typeof FullscreenPresenter> | null>(null)
 const pageOptimizeChatRef = ref<InstanceType<typeof PageOptimizeChat> | null>(null)
 const currentPageItem = computed<PreviewPageItem | null>(() =>
   props.items.find((item) => item.pageNumber === props.currentPageNumber) ?? props.items[0] ?? null
@@ -159,6 +174,45 @@ const currentPreviewVersionLabel = computed<string | null>(() =>
   )
 )
 const currentPageHasGeneratedCode = computed<boolean>(() => Boolean(currentPageItem.value?.hasGeneratedCode))
+const canEnterFullscreen = computed<boolean>(() => totalPages.value > 0)
+const canExportPdf = computed<boolean>(() => {
+  if (props.exportStarting) {
+    return false
+  }
+
+  if (props.exportTask && ['pending', 'running'].includes(props.exportTask.status)) {
+    return false
+  }
+
+  if (props.generationProgress.isGenerationActive || props.items.length === 0) {
+    return false
+  }
+
+  return props.items.every((item) => item.hasGeneratedCode)
+})
+const exportDisabledReason = computed<string>(() => {
+  if (props.exportStarting) {
+    return '正在提交导出任务。'
+  }
+
+  if (props.exportTask && ['pending', 'running'].includes(props.exportTask.status)) {
+    return '当前已有导出任务在执行。'
+  }
+
+  if (props.items.length === 0) {
+    return '当前项目还没有可导出的页面。'
+  }
+
+  if (props.generationProgress.isGenerationActive) {
+    return '页面仍在生成中，全部完成后才能导出 PDF。'
+  }
+
+  if (props.items.some((item) => !item.hasGeneratedCode)) {
+    return '仍有页面未生成完成，暂时不能导出 PDF。'
+  }
+
+  return ''
+})
 const canRefreshCurrentPage = computed<boolean>(() =>
   Boolean(currentRendererOverrideCode.value)
     || currentPageItem.value?.status === 'generated'
@@ -237,6 +291,29 @@ const rendererRefreshToken = computed<string>(() =>
   ].join('|')
 )
 
+onMounted(() => {
+  window.addEventListener('keydown', handleWindowKeydown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleWindowKeydown)
+  if (props.fullscreenActive) {
+    emit('exitFullscreen')
+  }
+})
+
+function handleWindowKeydown(event: KeyboardEvent): void {
+  if (event.defaultPrevented || event.key !== 'F5' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+    return
+  }
+
+  event.preventDefault()
+
+  if (!props.fullscreenActive && canEnterFullscreen.value) {
+    requestFullscreen()
+  }
+}
+
 function requestCurrentPageRefresh(): void {
   if (!canRefreshCurrentPage.value) {
     return
@@ -247,6 +324,15 @@ function requestCurrentPageRefresh(): void {
 
 function focusOptimizeComposer(): void {
   pageOptimizeChatRef.value?.focusComposer()
+}
+
+function requestFullscreen(): void {
+  if (!canEnterFullscreen.value) {
+    return
+  }
+
+  emit('enterFullscreen')
+  void fullscreenPresenterRef.value?.enterFullscreen()
 }
 
 defineExpose({
@@ -281,6 +367,9 @@ defineExpose({
         </div>
 
         <div class="flex items-center gap-2">
+          <NButton secondary strong :disabled="!canEnterFullscreen" @click="requestFullscreen">
+            全屏
+          </NButton>
           <NTag round :bordered="false" :type="currentPageStatusTagType">
             {{ currentPageStatusLabel }}
           </NTag>
@@ -301,6 +390,15 @@ defineExpose({
         :progress="generationProgress"
       />
 
+      <ExportTaskPanel
+        :disabled="!canExportPdf"
+        :disabled-reason="exportDisabledReason"
+        :starting="exportStarting"
+        :task="exportTask"
+        @download-artifact="emit('downloadExportArtifact')"
+        @start-pdf="emit('startExportPdf')"
+      />
+
       <SlideRenderer
         :current-generation-stage-label="generationProgress.currentGenerationStageLabel"
         :generation-active="generationProgress.isGenerationActive"
@@ -319,6 +417,7 @@ defineExpose({
         :current-page-number="currentPageItem?.pageNumber ?? currentPageNumber"
         :current-page-status="currentPageItem?.status ?? 'pending'"
         :current-page-title="currentPageTitle"
+        :keyboard-enabled="!fullscreenActive"
         :refresh-disabled-reason="refreshDisabledReason"
         :total-pages="Math.max(totalPages, 1)"
         @next="emit('nextPage')"
@@ -419,6 +518,26 @@ defineExpose({
       @preview-version="emit('previewPageVersion', $event)"
       @rollback-version="emit('rollbackPageVersion', $event)"
       @update:show="emit('update:versionDrawerShow', $event)"
+    />
+
+    <FullscreenPresenter
+      ref="fullscreenPresenterRef"
+      :active="fullscreenActive"
+      :can-go-next="canGoNext"
+      :can-go-previous="canGoPrevious"
+      :current-generation-stage-label="generationProgress.currentGenerationStageLabel"
+      :generation-active="generationProgress.isGenerationActive"
+      :generation-active-page-number="generationProgress.currentGeneratingPageNumber"
+      :page-number="currentPageItem?.pageNumber ?? currentPageNumber"
+      :page-status="currentPageItem?.status ?? 'pending'"
+      :page-title="currentPageItem?.title ?? `第 ${currentPageNumber} 页`"
+      :preview-override-code="currentRendererOverrideCode"
+      :refresh-token="rendererRefreshToken"
+      :total-pages="Math.max(totalPages, 1)"
+      @close="emit('exitFullscreen')"
+      @fullscreen-error="emit('fullscreenError', $event)"
+      @next-page="emit('nextPage')"
+      @previous-page="emit('previousPage')"
     />
   </div>
 </template>

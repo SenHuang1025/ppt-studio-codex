@@ -28,6 +28,11 @@ export interface ApiResponseContext<TData = unknown> extends ApiRequestContext {
   response: Response
 }
 
+export interface BackendErrorPayload {
+  detail?: string | unknown[]
+  error?: string
+}
+
 type ApiInterceptor<TContext> = (context: TContext) => Promise<TContext> | TContext
 
 const API_PREFIX = '/api'
@@ -203,11 +208,12 @@ async function resolveApiBaseUrl(): Promise<string> {
 
     return new URL(trimLeadingSlash(API_PREFIX), ensureTrailingSlash(pythonBaseUrl)).toString().replace(/\/$/, '')
   } catch (error: unknown) {
+    await runtime.recoverPythonSidecar().catch(() => undefined)
     if (error instanceof ApiError) {
       throw error
     }
 
-    throw new ApiError('Unable to resolve the Python backend address from Electron.', {
+    throw new ApiError('无法连接 Python 后端，Electron 已尝试恢复 sidecar，请稍后重试。', {
       cause: error,
       detail: error
     })
@@ -408,6 +414,14 @@ function extractErrorMessage(detail: unknown): string | null {
   }
 
   return null
+}
+
+export function isBackendErrorPayload(detail: unknown): detail is BackendErrorPayload {
+  if (!detail || typeof detail !== 'object') {
+    return false
+  }
+
+  return 'error' in detail || 'detail' in detail
 }
 
 function ensureTrailingSlash(value: string): string {

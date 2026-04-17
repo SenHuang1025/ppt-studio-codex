@@ -20,6 +20,7 @@ class Settings(BaseModel):
     log_dir: Path
     database_filename: str = "ppt_studio.db"
     sql_echo: bool = False
+    preview_base_url: str = "http://127.0.0.1:18921"
     preview_server_dir: Path | None = None
     preview_slides_dir: Path | None = None
     preview_theme_file_override: Path | None = None
@@ -44,6 +45,7 @@ class Settings(BaseModel):
         preview_slides_dir_raw = getenv("PPT_STUDIO_PREVIEW_SLIDES_DIR")
         preview_server_dir_raw = getenv("PPT_STUDIO_PREVIEW_SERVER_DIR")
         preview_theme_file_raw = getenv("PPT_STUDIO_PREVIEW_THEME_FILE")
+        preview_base_url_raw = getenv("PPT_STUDIO_PREVIEW_BASE_URL")
         port_raw = getenv("PPT_STUDIO_PORT")
         sql_echo_raw = getenv("PPT_STUDIO_SQL_ECHO", "0").strip().lower()
 
@@ -54,6 +56,7 @@ class Settings(BaseModel):
             backend_dir=backend_dir,
             data_dir=data_dir,
             log_dir=data_dir / "logs",
+            preview_base_url=(preview_base_url_raw or "http://127.0.0.1:18921").strip().rstrip("/"),
             preview_server_dir=(
                 Path(preview_server_dir_raw).expanduser().resolve()
                 if preview_server_dir_raw

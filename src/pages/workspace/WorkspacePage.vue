@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, h, ref, toRef, watch } from 'vue'
+import { computed, h, onBeforeUnmount, ref, toRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NButton, NInput, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
+import ErrorBoundary from '@/components/common/ErrorBoundary.vue'
 import GlassPanel from '@/components/common/GlassPanel.vue'
 import ModeSwitchPill from '@/components/common/ModeSwitchPill.vue'
 import OutlinePanel from '@/components/outline/OutlinePanel.vue'
@@ -10,9 +11,12 @@ import PreviewPanel from '@/components/preview/PreviewPanel.vue'
 import { usePageOptimizeSession } from '@/composables/usePageOptimizeSession'
 import { usePreviewWorkspace } from '@/composables/usePreviewWorkspace'
 import { useWorkspaceAgentSession } from '@/composables/useWorkspaceAgentSession'
+import { projectExportService } from '@/services/exportService'
+import { notifyApiError, resolveAppErrorMessage } from '@/services/errorHandling'
 import { pageService } from '@/services/pageService'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import type { WorkspaceMode } from '@/stores/workspaceStore'
+import type { ProjectExportTask } from '@/types/export'
 import { UPLOAD_FILE_ACCEPT_ATTRIBUTE, type UploadedFile } from '@/types/file'
 import type { Outline, PageVersion } from '@/types/project'
 import type { PreviewVersionSelection } from '@/types/preview'
@@ -44,6 +48,9 @@ const insertingPageAfter = ref<number | null>(null)
 const deletingPageNumber = ref<number | null>(null)
 const duplicatingPageNumber = ref<number | null>(null)
 const reorderingPages = ref(false)
+const exportStarting = ref(false)
+const exportTask = ref<ProjectExportTask | null>(null)
+let exportPollTimer: number | null = null
 const session = useWorkspaceAgentSession({
   projectId: toRef(props, 'projectId'),
   router,
@@ -119,6 +126,8 @@ watch(
     if (!previousValue || previousValue[0] !== projectId) {
       session.disconnect()
       session.resetRealtimeSessionState({ clearTimeline: true })
+      clearExportPolling()
+      exportTask.value = null
     }
 
     void workspaceStore
@@ -137,6 +146,10 @@ watch(
     workspaceStore.setMode(mode)
   }
 )
+
+onBeforeUnmount(() => {
+  clearExportPolling()
+})
 
 function handleModeSelect(mode: WorkspaceMode): void {
   workspaceStore.setMode(mode)
@@ -180,9 +193,10 @@ async function handleFilesSelected(files: File[]): Promise<void> {
       message.error(errorMessage)
     }
   } catch (error: unknown) {
-    const uiError = resolveUiError(error)
+    const uiError = notifyApiError(error, {
+      fallback: '文件上传失败，请稍后重试。'
+    })
     session.appendStatusTimelineItem('上传失败', uiError, 'error')
-    message.error(uiError)
   }
 }
 
@@ -191,9 +205,10 @@ async function handleDeleteFile(file: UploadedFile): Promise<void> {
     await workspaceStore.deleteUploadedFile(file.id)
     message.success(`已删除 ${file.original_name}`)
   } catch (error: unknown) {
-    const uiError = resolveUiError(error)
+    const uiError = notifyApiError(error, {
+      fallback: '删除文件失败，请稍后重试。'
+    })
     session.appendStatusTimelineItem('删除失败', uiError, 'error')
-    message.error(uiError)
   }
 }
 
@@ -206,14 +221,14 @@ async function handleChatSubmit(messageContent: string): Promise<void> {
   chatDraft.value = ''
   const uiError = await session.handleChatSubmit(normalizedMessage)
   if (uiError) {
-    message.error(uiError)
+    notifyApiError(uiError)
   }
 }
 
 async function handleConfirmOutline(): Promise<void> {
   const uiError = await session.handleConfirmOutline(resolvedOutline.value)
   if (uiError) {
-    message.error(uiError)
+    notifyApiError(uiError)
   }
 }
 
@@ -230,7 +245,9 @@ async function handleThemeApply(theme: ThemeConfig): Promise<void> {
     await workspaceStore.applyTheme(theme)
     message.success(`已应用 ${theme.label}`)
   } catch (error: unknown) {
-    message.error(resolveUiError(error, '主题切换失败，请确认 Python 后端与 preview server 已正常运行。'))
+    notifyApiError(error, {
+      fallback: '主题切换失败，请确认 Python 后端与 preview server 已正常运行。'
+    })
   }
 }
 
@@ -250,7 +267,7 @@ async function handleOptimizeSubmit(messageContent: string): Promise<void> {
   optimizeDraft.value = ''
   const uiError = await pageOptimizeSession.sendPageMessage(normalizedMessage)
   if (uiError) {
-    message.error(uiError)
+    notifyApiError(uiError)
     return
   }
 
@@ -263,7 +280,7 @@ async function handleOptimizeQuickPrompt(payload: { actionLabel: string; prompt:
   })
 
   if (uiError) {
-    message.error(uiError)
+    notifyApiError(uiError)
     return
   }
 
@@ -274,7 +291,7 @@ async function handleOptimizeRegeneratePage(): Promise<void> {
   const uiError = await pageOptimizeSession.regenerateCurrentPage()
 
   if (uiError) {
-    message.error(uiError)
+    notifyApiError(uiError)
     return
   }
 
@@ -285,11 +302,96 @@ async function handleOptimizeConfirmPage(): Promise<void> {
   const uiError = await pageOptimizeSession.confirmCurrentPage()
 
   if (uiError) {
-    message.error(uiError)
+    notifyApiError(uiError)
     return
   }
 
   message.success(`第 ${workspaceStore.currentPreviewPage} 页已确认`)
+}
+
+async function handleStartPdfExport(): Promise<void> {
+  if (exportStarting.value) {
+    return
+  }
+
+  exportStarting.value = true
+  clearExportPolling()
+
+  try {
+    exportTask.value = await projectExportService.startPdfExport(props.projectId)
+    message.success('已开始导出 PDF')
+    scheduleExportPolling(0)
+  } catch (error: unknown) {
+    notifyApiError(error, {
+      fallback: '启动 PDF 导出失败，请确认当前项目已全部生成。'
+    })
+  } finally {
+    exportStarting.value = false
+  }
+}
+
+function handleEnterFullscreen(): void {
+  if (workspaceStore.currentMode !== 'preview') {
+    return
+  }
+
+  workspaceStore.setPreviewFullscreenActive(true)
+}
+
+function handleExitFullscreen(): void {
+  workspaceStore.setPreviewFullscreenActive(false)
+}
+
+function handleFullscreenError(errorMessage: string): void {
+  workspaceStore.setPreviewFullscreenActive(false)
+  notifyApiError(errorMessage)
+}
+
+async function handleDownloadExportArtifact(): Promise<void> {
+  if (!exportTask.value) {
+    return
+  }
+
+  try {
+    await projectExportService.downloadArtifact(props.projectId, exportTask.value)
+  } catch (error: unknown) {
+    notifyApiError(error, {
+      fallback: '导出文件下载失败，请稍后重试。'
+    })
+  }
+}
+
+async function refreshExportTask(): Promise<void> {
+  if (!exportTask.value) {
+    return
+  }
+
+  const previousStatus = exportTask.value.status
+
+  try {
+    const latestTask = await projectExportService.getTask(props.projectId, exportTask.value.id)
+    exportTask.value = latestTask
+
+    if (previousStatus !== latestTask.status) {
+      if (latestTask.status === 'completed') {
+        message.success('PDF 导出完成')
+      } else if (latestTask.status === 'failed') {
+        notifyApiError(latestTask.error || 'PDF 导出失败')
+      }
+    }
+  } catch (error: unknown) {
+    clearExportPolling()
+    notifyApiError(error, {
+      fallback: '导出状态刷新失败，请稍后手动重试。'
+    })
+    return
+  }
+
+  if (exportTask.value && ['pending', 'running'].includes(exportTask.value.status)) {
+    scheduleExportPolling()
+  } else {
+    clearExportPolling()
+  }
 }
 
 async function handleShowPageVersionHistory(pageNumber: number): Promise<void> {
@@ -300,7 +402,9 @@ async function handleShowPageVersionHistory(pageNumber: number): Promise<void> {
   try {
     versionDrawerVersions.value = await pageService.listVersions(props.projectId, pageNumber)
   } catch (error: unknown) {
-    message.error(resolveUiError(error, '历史版本加载失败，请确认 Python 后端已经启动。'))
+    notifyApiError(error, {
+      fallback: '历史版本加载失败，请确认 Python 后端已经启动。'
+    })
     versionDrawerShow.value = false
   } finally {
     versionDrawerLoading.value = false
@@ -327,7 +431,9 @@ async function handlePreviewPageVersion(version: PageVersion): Promise<void> {
       workspaceStore.setPreviewPage(pageNumber)
     }
   } catch (error: unknown) {
-    message.error(resolveUiError(error, '历史版本预览失败，请确认 Python 后端已经启动。'))
+    notifyApiError(error, {
+      fallback: '历史版本预览失败，请确认 Python 后端已经启动。'
+    })
   }
 }
 
@@ -350,7 +456,9 @@ async function handleRollbackPageVersion(version: PageVersion): Promise<void> {
     }
     message.success(`第 ${pageNumber} 页已回滚到 v${version.version}`)
   } catch (error: unknown) {
-    message.error(resolveUiError(error, '页面回滚失败，请确认 Python 后端已经启动。'))
+    notifyApiError(error, {
+      fallback: '页面回滚失败，请确认 Python 后端已经启动。'
+    })
   } finally {
     versionDrawerRollingBack.value = false
     versionDrawerRollingBackVersion.value = null
@@ -377,7 +485,9 @@ function handleDeletePage(pageNumber: number): void {
         await refreshProjectAfterPageMutation(pageNumber)
         message.success(`已删除第 ${pageNumber} 页`)
       } catch (error: unknown) {
-        message.error(resolveUiError(error, '删除页面失败，请确认 Python 后端已经启动。'))
+        notifyApiError(error, {
+          fallback: '删除页面失败，请确认 Python 后端已经启动。'
+        })
       } finally {
         deletingPageNumber.value = null
       }
@@ -431,7 +541,9 @@ function handleInsertPageAfter(pageNumber: number): void {
         await refreshProjectAfterPageMutation(insertedPage.page_number)
         message.success(`已插入第 ${insertedPage.page_number} 页`)
       } catch (error: unknown) {
-        message.error(resolveUiError(error, '插入新页失败，请确认 API Key、Python 后端与 preview server 已正常运行。'))
+        notifyApiError(error, {
+          fallback: '插入新页失败，请确认 API Key、Python 后端与 preview server 已正常运行。'
+        })
       } finally {
         insertingPageAfter.value = null
       }
@@ -452,7 +564,9 @@ async function handleDuplicatePage(pageNumber: number): Promise<void> {
     await refreshProjectAfterPageMutation(duplicatedPage.page_number)
     message.success(`已复制到第 ${duplicatedPage.page_number} 页`)
   } catch (error: unknown) {
-    message.error(resolveUiError(error, '复制页面失败，请确认该页已生成且 Python 后端已经启动。'))
+    notifyApiError(error, {
+      fallback: '复制页面失败，请确认该页已生成且 Python 后端已经启动。'
+    })
   } finally {
     duplicatingPageNumber.value = null
   }
@@ -465,7 +579,7 @@ async function handleReorderPages(pageNumbers: number[]): Promise<void> {
 
   const normalizedPageNumbers = pageNumbers.filter((pageNumber) => Number.isFinite(pageNumber) && pageNumber > 0)
   if (normalizedPageNumbers.length !== pageNumbers.length) {
-    message.error('页面排序参数无效。')
+    notifyApiError('页面排序参数无效。')
     return
   }
 
@@ -481,7 +595,9 @@ async function handleReorderPages(pageNumbers: number[]): Promise<void> {
     await refreshProjectAfterPageMutation(nextPreviewPage > 0 ? nextPreviewPage : workspaceStore.currentPreviewPage)
     message.success('页面顺序已更新')
   } catch (error: unknown) {
-    message.error(resolveUiError(error, '页面排序失败，请确认 Python 后端已经启动。'))
+    notifyApiError(error, {
+      fallback: '页面排序失败，请确认 Python 后端已经启动。'
+    })
   } finally {
     reorderingPages.value = false
   }
@@ -519,6 +635,22 @@ function getCurrentTotalPageCount(): number {
   return Math.max(1, resolvedOutline.value?.total_pages ?? workspaceStore.project?.total_pages ?? previewPageItems.value.length)
 }
 
+function scheduleExportPolling(delayMs = 1000): void {
+  clearExportPolling()
+  exportPollTimer = window.setTimeout(() => {
+    void refreshExportTask()
+  }, delayMs)
+}
+
+function clearExportPolling(): void {
+  if (exportPollTimer === null) {
+    return
+  }
+
+  window.clearTimeout(exportPollTimer)
+  exportPollTimer = null
+}
+
 watch(versionDrawerShow, (show) => {
   if (show) {
     return
@@ -532,11 +664,7 @@ watch(versionDrawerShow, (show) => {
 })
 
 function resolveUiError(error: unknown, fallback = '文件操作失败，请确认 Python 后端已经启动。'): string {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message.trim()
-  }
-
-  return fallback
+  return resolveAppErrorMessage(error, fallback)
 }
 </script>
 
@@ -599,103 +727,116 @@ function resolveUiError(error: unknown, fallback = '文件操作失败，请确�
       v-if="workspaceStore.currentMode === 'chat'"
       class="grid min-h-[780px] gap-6 xl:grid-cols-[minmax(360px,0.92fr)_minmax(460px,1.08fr)]"
     >
-      <ChatPanel
-        ref="chatPanelRef"
-        :accept="UPLOAD_FILE_ACCEPT_ATTRIBUTE"
-        :chat-error="workspaceStore.chatMessagesError"
-        :chat-loaded="workspaceStore.chatMessagesLoaded"
-        :chat-loading="workspaceStore.chatMessagesLoading"
-        :connection-state="session.agentConnectionState.value"
-        :debug-events="session.agentEventLog.value"
-        :deleting-file-ids="deletingFileIds"
-        :disabled="workspaceStore.projectLoading || session.isConfirmingOutline.value"
-        :draft="chatDraft"
-        :files="workspaceStore.uploadedFiles"
-        :files-error="workspaceStore.filesError"
-        :files-loading="workspaceStore.filesLoading"
-        :project-name="workspaceStore.projectName"
-        :submitting="session.isChatSubmitting.value"
-        :timeline-items="session.timelineItems.value"
-        :uploading="workspaceStore.filesUploading"
-        @delete-file="handleDeleteFile"
-        @focus-outline="handleOutlineFocus"
-        @message-reveal-complete="session.handleMessageRevealComplete"
-        @select-files="handleFilesSelected"
-        @submit="handleChatSubmit"
-        @update:draft="chatDraft = $event"
-      />
+      <ErrorBoundary title="对话面板渲染失败" :reset-key="`${props.projectId}:${workspaceStore.currentMode}:chat-panel`">
+        <ChatPanel
+          ref="chatPanelRef"
+          :accept="UPLOAD_FILE_ACCEPT_ATTRIBUTE"
+          :chat-error="workspaceStore.chatMessagesError"
+          :chat-loaded="workspaceStore.chatMessagesLoaded"
+          :chat-loading="workspaceStore.chatMessagesLoading"
+          :connection-state="session.agentConnectionState.value"
+          :debug-events="session.agentEventLog.value"
+          :deleting-file-ids="deletingFileIds"
+          :disabled="workspaceStore.projectLoading || session.isConfirmingOutline.value"
+          :draft="chatDraft"
+          :files="workspaceStore.uploadedFiles"
+          :files-error="workspaceStore.filesError"
+          :files-loading="workspaceStore.filesLoading"
+          :project-name="workspaceStore.projectName"
+          :submitting="session.isChatSubmitting.value"
+          :timeline-items="session.timelineItems.value"
+          :uploading="workspaceStore.filesUploading"
+          @delete-file="handleDeleteFile"
+          @focus-outline="handleOutlineFocus"
+          @message-reveal-complete="session.handleMessageRevealComplete"
+          @select-files="handleFilesSelected"
+          @submit="handleChatSubmit"
+          @update:draft="chatDraft = $event"
+        />
+      </ErrorBoundary>
 
-      <OutlinePanel
-        :active-page-number="session.activeOutlinePageNumber.value"
-        :confirming="session.isConfirmingOutline.value"
-        :disabled="workspaceStore.projectLoading || workspaceStore.filesUploading || session.isAgentRequestInFlight.value"
-        :outline="resolvedOutline"
-        preview-link-enabled
-        :project-name="workspaceStore.projectName"
-        @adjust="handleAdjustOutline"
-        @confirm="handleConfirmOutline"
-        @preview="openPreviewModeForPage"
-        @select-page="handleOutlineFocus"
-      />
+      <ErrorBoundary title="大纲面板渲染失败" :reset-key="`${props.projectId}:${workspaceStore.currentMode}:outline-panel`">
+        <OutlinePanel
+          :active-page-number="session.activeOutlinePageNumber.value"
+          :confirming="session.isConfirmingOutline.value"
+          :disabled="workspaceStore.projectLoading || workspaceStore.filesUploading || session.isAgentRequestInFlight.value"
+          :outline="resolvedOutline"
+          preview-link-enabled
+          :project-name="workspaceStore.projectName"
+          @adjust="handleAdjustOutline"
+          @confirm="handleConfirmOutline"
+          @preview="openPreviewModeForPage"
+          @select-page="handleOutlineFocus"
+        />
+      </ErrorBoundary>
     </div>
 
-    <PreviewPanel
-      ref="previewPanelRef"
-      v-else
-      :active-theme-id="workspaceStore.activePreviewThemeId"
-      :active-optimizing-page-number="pageOptimizeSession.activeOptimizingPageNumber.value"
-      :applying-theme-id="workspaceStore.themeApplyingId"
-      :current-page-number="workspaceStore.currentPreviewPage"
-      :generation-progress="session.generationProgress.value"
-      :items="previewPageItems"
-      :optimize-chat-connection-state="pageOptimizeSession.agentConnectionState.value"
-      :optimize-confirming-page="pageOptimizeSession.confirmingPage.value"
-      :optimize-current-action-label="pageOptimizeSession.currentActionLabel.value"
-      :optimize-chat-debug-events="pageOptimizeSession.agentEventLog.value"
-      :optimize-chat-draft="optimizeDraft"
-      :optimize-chat-error="pageOptimizeSession.pageMessagesError.value"
-      :optimize-chat-loaded="pageOptimizeSession.pageMessagesLoaded.value"
-      :optimize-chat-loading="pageOptimizeSession.pageMessagesLoading.value"
-      :optimize-preview-refresh-request="pageOptimizeSession.latestPreviewRefreshRequest.value"
-      :optimize-chat-submitting="pageOptimizeSession.isCurrentPageOptimizing.value"
-      :optimize-chat-timeline-items="pageOptimizeSession.timelineItems.value"
-      :project-chat-expanded="workspaceStore.previewProjectChatExpanded"
-      :project-chat-loaded="workspaceStore.chatMessagesLoaded"
-      :project-chat-loading="workspaceStore.chatMessagesLoading"
-      :project-chat-timeline-items="session.timelineItems.value"
-      :version-drawer-loading="versionDrawerLoading"
-      :version-drawer-page-number="versionDrawerPageNumber"
-      :version-drawer-rolling-back="versionDrawerRollingBack"
-      :version-drawer-rolling-back-version="versionDrawerRollingBackVersion"
-      :version-drawer-selected-version="selectedPreviewVersion"
-      :version-drawer-show="versionDrawerShow"
-      :version-drawer-versions="versionDrawerVersions"
-      :theme-error="previewThemeError"
-      :theme-loading="workspaceStore.themePresetsLoading"
-      :theme-syncing="workspaceStore.previewThemeSyncing"
-      :themes="workspaceStore.themePresets"
-      @apply-theme="handleThemeApply"
-      @delete-page="handleDeletePage"
-      @duplicate-page="handleDuplicatePage"
-      @insert-page-after="handleInsertPageAfter"
-      @next-page="handlePreviewNextPage"
-      @open-chat-mode="openChatMode"
-      @optimize-confirm-page="handleOptimizeConfirmPage"
-      @optimize-message-reveal-complete="pageOptimizeSession.handleMessageRevealComplete"
-      @project-message-reveal-complete="session.handleMessageRevealComplete"
-      @optimize-quick-prompt="handleOptimizeQuickPrompt"
-      @optimize-regenerate-page="handleOptimizeRegeneratePage"
-      @optimize-submit="handleOptimizeSubmit"
-      @preview-page-version="handlePreviewPageVersion"
-      @previous-page="handlePreviewPreviousPage"
-      @reorder-pages="handleReorderPages"
-      @rollback-page-version="handleRollbackPageVersion"
-      @retry-theme="handleThemeRetry"
-      @select-page="handlePreviewSelectPage"
-      @show-page-version-history="handleShowPageVersionHistory"
-      @update:optimize-chat-draft="optimizeDraft = $event"
-      @update:project-chat-expanded="workspaceStore.setPreviewProjectChatExpanded($event)"
-      @update:version-drawer-show="versionDrawerShow = $event"
-    />
+    <ErrorBoundary v-else title="预览工作区渲染失败" :reset-key="`${props.projectId}:${workspaceStore.currentMode}:preview-panel`">
+      <PreviewPanel
+        ref="previewPanelRef"
+        :active-theme-id="workspaceStore.activePreviewThemeId"
+        :active-optimizing-page-number="pageOptimizeSession.activeOptimizingPageNumber.value"
+        :applying-theme-id="workspaceStore.themeApplyingId"
+        :current-page-number="workspaceStore.currentPreviewPage"
+        :export-starting="exportStarting"
+        :export-task="exportTask"
+        :fullscreen-active="workspaceStore.previewFullscreenActive"
+        :generation-progress="session.generationProgress.value"
+        :items="previewPageItems"
+        :optimize-chat-connection-state="pageOptimizeSession.agentConnectionState.value"
+        :optimize-confirming-page="pageOptimizeSession.confirmingPage.value"
+        :optimize-current-action-label="pageOptimizeSession.currentActionLabel.value"
+        :optimize-chat-debug-events="pageOptimizeSession.agentEventLog.value"
+        :optimize-chat-draft="optimizeDraft"
+        :optimize-chat-error="pageOptimizeSession.pageMessagesError.value"
+        :optimize-chat-loaded="pageOptimizeSession.pageMessagesLoaded.value"
+        :optimize-chat-loading="pageOptimizeSession.pageMessagesLoading.value"
+        :optimize-preview-refresh-request="pageOptimizeSession.latestPreviewRefreshRequest.value"
+        :optimize-chat-submitting="pageOptimizeSession.isCurrentPageOptimizing.value"
+        :optimize-chat-timeline-items="pageOptimizeSession.timelineItems.value"
+        :project-chat-expanded="workspaceStore.previewProjectChatExpanded"
+        :project-chat-loaded="workspaceStore.chatMessagesLoaded"
+        :project-chat-loading="workspaceStore.chatMessagesLoading"
+        :project-chat-timeline-items="session.timelineItems.value"
+        :version-drawer-loading="versionDrawerLoading"
+        :version-drawer-page-number="versionDrawerPageNumber"
+        :version-drawer-rolling-back="versionDrawerRollingBack"
+        :version-drawer-rolling-back-version="versionDrawerRollingBackVersion"
+        :version-drawer-selected-version="selectedPreviewVersion"
+        :version-drawer-show="versionDrawerShow"
+        :version-drawer-versions="versionDrawerVersions"
+        :theme-error="previewThemeError"
+        :theme-loading="workspaceStore.themePresetsLoading"
+        :theme-syncing="workspaceStore.previewThemeSyncing"
+        :themes="workspaceStore.themePresets"
+        @apply-theme="handleThemeApply"
+        @delete-page="handleDeletePage"
+        @duplicate-page="handleDuplicatePage"
+        @insert-page-after="handleInsertPageAfter"
+        @next-page="handlePreviewNextPage"
+        @open-chat-mode="openChatMode"
+        @download-export-artifact="handleDownloadExportArtifact"
+        @enter-fullscreen="handleEnterFullscreen"
+        @exit-fullscreen="handleExitFullscreen"
+        @fullscreen-error="handleFullscreenError"
+        @optimize-confirm-page="handleOptimizeConfirmPage"
+        @optimize-message-reveal-complete="pageOptimizeSession.handleMessageRevealComplete"
+        @project-message-reveal-complete="session.handleMessageRevealComplete"
+        @optimize-quick-prompt="handleOptimizeQuickPrompt"
+        @optimize-regenerate-page="handleOptimizeRegeneratePage"
+        @optimize-submit="handleOptimizeSubmit"
+        @preview-page-version="handlePreviewPageVersion"
+        @previous-page="handlePreviewPreviousPage"
+        @reorder-pages="handleReorderPages"
+        @rollback-page-version="handleRollbackPageVersion"
+        @retry-theme="handleThemeRetry"
+        @select-page="handlePreviewSelectPage"
+        @show-page-version-history="handleShowPageVersionHistory"
+        @start-export-pdf="handleStartPdfExport"
+        @update:optimize-chat-draft="optimizeDraft = $event"
+        @update:project-chat-expanded="workspaceStore.setPreviewProjectChatExpanded($event)"
+        @update:version-drawer-show="versionDrawerShow = $event"
+      />
+    </ErrorBoundary>
   </section>
 </template>

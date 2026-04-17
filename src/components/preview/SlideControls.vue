@@ -11,9 +11,11 @@ const props = withDefaults(defineProps<{
   currentPageNumber: number
   currentPageStatus: PreviewPageStatus
   currentPageTitle: string
+  keyboardEnabled?: boolean
   refreshDisabledReason?: string | null
   totalPages: number
 }>(), {
+  keyboardEnabled: true,
   refreshDisabledReason: null
 })
 
@@ -37,6 +39,10 @@ onBeforeUnmount(() => {
 })
 
 function handleWindowKeydown(event: KeyboardEvent): void {
+  if (!props.keyboardEnabled) {
+    return
+  }
+
   if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
     return
   }

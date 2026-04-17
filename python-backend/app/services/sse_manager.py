@@ -17,10 +17,13 @@ class SSEManagerError(RuntimeError):
 class _ManagedStream:
     queue: asyncio.Queue[JSONServerSentEvent | object]
     closed: bool = False
+    disconnect_task: asyncio.Task[None] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    producer_task: asyncio.Task[None] | None = None
 
 
 _STREAM_END = object()
+_RECONNECT_GRACE_SECONDS = 8.0
 
 
 class SSEManager:
@@ -40,22 +43,23 @@ class SSEManager:
         stream_id: str | None = None,
     ) -> AsyncGenerator[JSONServerSentEvent, None]:
         resolved_stream_id = stream_id or self._create_stream_id()
-        managed_stream = _ManagedStream(queue=asyncio.Queue())
 
         async with self._lock:
             project_streams = self._project_streams.setdefault(project_id, {})
-            project_streams[resolved_stream_id] = managed_stream
+            managed_stream = project_streams.get(resolved_stream_id)
+            if managed_stream is None:
+                managed_stream = _ManagedStream(queue=asyncio.Queue())
+                project_streams[resolved_stream_id] = managed_stream
+            else:
+                self._cancel_disconnect_task(managed_stream)
 
         async def event_stream() -> AsyncGenerator[JSONServerSentEvent, None]:
-            try:
-                while True:
-                    queued_event = await managed_stream.queue.get()
-                    if queued_event is _STREAM_END:
-                        break
+            while True:
+                queued_event = await managed_stream.queue.get()
+                if queued_event is _STREAM_END:
+                    break
 
-                    yield queued_event
-            finally:
-                await self._discard_stream(project_id, resolved_stream_id)
+                yield queued_event
 
         return event_stream()
 
@@ -84,12 +88,56 @@ class SSEManager:
         streams = await self._take_streams_for_close(project_id, stream_id=stream_id)
 
         for managed_stream in streams:
+            self._cancel_disconnect_task(managed_stream)
             async with managed_stream.lock:
                 if managed_stream.closed:
                     continue
 
                 managed_stream.closed = True
                 await managed_stream.queue.put(_STREAM_END)
+
+    async def has_stream(self, project_id: str, *, stream_id: str) -> bool:
+        async with self._lock:
+            return stream_id in self._project_streams.get(project_id, {})
+
+    async def register_producer_task(
+        self,
+        project_id: str,
+        *,
+        stream_id: str,
+        producer_task: asyncio.Task[None],
+    ) -> None:
+        stream = await self._get_stream(project_id, stream_id=stream_id)
+        if stream is None:
+            return
+        stream.producer_task = producer_task
+
+    async def mark_client_disconnected(self, project_id: str, *, stream_id: str) -> None:
+        stream = await self._get_stream(project_id, stream_id=stream_id)
+        if stream is None or stream.closed:
+            return
+
+        async def _disconnect_later() -> None:
+            try:
+                await asyncio.sleep(_RECONNECT_GRACE_SECONDS)
+                producer_task = stream.producer_task
+                if producer_task is not None and not producer_task.done():
+                    producer_task.cancel()
+                await self.close_stream(project_id, stream_id=stream_id)
+            except asyncio.CancelledError:
+                return
+
+        stream.disconnect_task = asyncio.create_task(_disconnect_later())
+
+    async def cancel_stream(self, project_id: str, *, stream_id: str) -> None:
+        stream = await self._get_stream(project_id, stream_id=stream_id)
+        if stream is None:
+            return
+
+        producer_task = stream.producer_task
+        if producer_task is not None and not producer_task.done():
+            producer_task.cancel()
+        await self.close_stream(project_id, stream_id=stream_id)
 
     async def shutdown(self) -> None:
         async with self._lock:
@@ -148,3 +196,11 @@ class SSEManager:
 
     def _create_stream_id(self) -> str:
         return uuid4().hex
+
+    def _cancel_disconnect_task(self, stream: _ManagedStream) -> None:
+        disconnect_task = stream.disconnect_task
+        if disconnect_task is None:
+            return
+
+        disconnect_task.cancel()
+        stream.disconnect_task = None

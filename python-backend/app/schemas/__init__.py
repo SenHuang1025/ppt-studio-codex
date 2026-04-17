@@ -7,6 +7,8 @@ from app.schemas.chat import (
     SSEEvent,
 )
 from app.schemas.enums import ChatMessageType, ChatRole, FileParseStatus, PageStatus, ProjectStatus
+from app.schemas.error import ErrorResponse
+from app.schemas.export import ProjectExportFormat, ProjectExportStatus, ProjectExportTaskResponse
 from app.schemas.file import ParsedFileResponse, UploadedFileDeleteResponse, UploadedFileListResponse, UploadedFileResponse
 from app.schemas.health import HealthResponse
 from app.schemas.project import (
@@ -49,10 +51,14 @@ __all__ = [
     "ChatMessageResponse",
     "ChatMessageType",
     "ChatRole",
+    "ErrorResponse",
     "FileParseStatus",
     "HealthResponse",
     "OutlinePageSchema",
     "OutlineSchema",
+    "ProjectExportFormat",
+    "ProjectExportStatus",
+    "ProjectExportTaskResponse",
     "PageInsertAfterRequest",
     "PageMutationResponse",
     "PageReorderRequest",
