@@ -19,6 +19,7 @@ from app.api.agent import router as agent_router
 from app.api.projects import router as projects_router
 from app.config import Settings, get_settings
 from app.db import get_db_session
+from app.main import register_exception_handlers
 from app.models import ChatMessage, PageVersion, ProjectPage
 from app.schemas import AppTheme, LLMProvider, ProjectCreate, SettingsResponse
 from app.services import FileService, ProjectService, SSEManager
@@ -669,6 +670,7 @@ def build_test_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     app = FastAPI()
     app.state.sse_manager = SSEManager()
+    register_exception_handlers(app)
     app.include_router(projects_router)
     app.include_router(agent_router)
 

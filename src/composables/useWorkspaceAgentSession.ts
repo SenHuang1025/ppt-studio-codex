@@ -87,7 +87,9 @@ export function useWorkspaceAgentSession(options: UseWorkspaceAgentSessionOption
     new Map(options.workspaceStore.projectPages.map((page) => [page.page_number, page]))
   )
   const isAgentRequestInFlight = computed<boolean>(
-    () => agentConnectionState.value === 'connecting' || agentConnectionState.value === 'streaming'
+    () => agentConnectionState.value === 'connecting'
+      || agentConnectionState.value === 'reconnecting'
+      || agentConnectionState.value === 'streaming'
   )
   const isChatSubmitting = computed<boolean>(() =>
     currentStreamPurpose.value === 'chat' && isAgentRequestInFlight.value

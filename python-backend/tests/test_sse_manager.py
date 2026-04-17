@@ -29,3 +29,30 @@ async def _run_sse_manager_test() -> None:
         return
 
     raise AssertionError("SSE stream should have been closed.")
+
+
+def test_sse_manager_reuses_existing_stream_id() -> None:
+    asyncio.run(_run_sse_reconnect_test())
+
+
+async def _run_sse_reconnect_test() -> None:
+    sse_manager = SSEManager()
+    _stream = await sse_manager.create_stream("project-1", stream_id="stream-1")
+    await sse_manager.mark_client_disconnected("project-1", stream_id="stream-1")
+
+    resumed_stream = await sse_manager.create_stream("project-1", stream_id="stream-1")
+    await sse_manager.send_event("project-1", "thinking", {"content": "hello again"}, stream_id="stream-1")
+
+    resumed_event = await asyncio.wait_for(anext(resumed_stream), timeout=1)
+    encoded_event = resumed_event.encode().decode("utf-8")
+
+    assert "event: thinking" in encoded_event
+    assert 'data: {"content":"hello again"}' in encoded_event
+
+    await sse_manager.close_stream("project-1", stream_id="stream-1")
+    try:
+        await asyncio.wait_for(anext(resumed_stream), timeout=1)
+    except StopAsyncIteration:
+        return
+
+    raise AssertionError("Resumed SSE stream should have been closed.")

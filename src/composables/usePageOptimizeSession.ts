@@ -73,7 +73,9 @@ export function usePageOptimizeSession(options: UsePageOptimizeSessionOptions) {
   )
   const timelineItems = useChatTimeline(pageMessages, sessionTimelineItems)
   const isAgentRequestInFlight = computed<boolean>(
-    () => agentConnectionState.value === 'connecting' || agentConnectionState.value === 'streaming'
+    () => agentConnectionState.value === 'connecting'
+      || agentConnectionState.value === 'reconnecting'
+      || agentConnectionState.value === 'streaming'
   )
   const isBusy = computed<boolean>(() => isAgentRequestInFlight.value || confirmingPage.value)
   const isCurrentPageOptimizing = computed<boolean>(() =>

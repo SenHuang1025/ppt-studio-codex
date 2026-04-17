@@ -29,16 +29,29 @@ export function buildPreviewVersionUrl(baseUrl: string, pageNumber: number): str
 }
 
 export async function ensurePreviewServerReachable(baseUrl: string): Promise<void> {
-  await fetch(ensureTrailingSlash(baseUrl), {
-    cache: 'no-store',
-    mode: 'no-cors',
-    signal: AbortSignal.timeout(PREVIEW_REACHABILITY_TIMEOUT_MS)
-  })
+  try {
+    await fetch(ensureTrailingSlash(baseUrl), {
+      cache: 'no-store',
+      mode: 'no-cors',
+      signal: AbortSignal.timeout(PREVIEW_REACHABILITY_TIMEOUT_MS)
+    })
+  } catch {
+    const runtime = resolveRuntime()
+    await runtime.recoverPreviewServer().catch(() => undefined)
+    throw new Error('预览服务连接失败，Electron 已尝试恢复 preview server。')
+  }
 }
 
 async function resolvePreviewBaseUrl(): Promise<string> {
   const runtime = resolveRuntime()
-  const baseUrl = normalizeUrl(await runtime.getPreviewBaseUrl())
+  let baseUrl = ''
+
+  try {
+    baseUrl = normalizeUrl(await runtime.getPreviewBaseUrl())
+  } catch (error: unknown) {
+    await runtime.recoverPreviewServer().catch(() => undefined)
+    throw error
+  }
 
   if (!baseUrl) {
     throw new Error('Electron runtime returned an empty preview server URL.')

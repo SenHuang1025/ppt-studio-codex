@@ -108,11 +108,14 @@ class ApiClient {
     try {
       response = await fetch(requestContext.url, requestContext.init)
     } catch (error: unknown) {
+      const runtime = resolvePptStudioRuntime()
+      await runtime?.recoverPythonSidecar().catch(() => undefined)
+
       if (error instanceof ApiError) {
         throw error
       }
 
-      throw new ApiError('Unable to connect to the PPT Studio backend service.', {
+      throw new ApiError('无法连接到 PPT Studio 后端服务，Electron 已尝试恢复 Python sidecar。', {
         cause: error,
         detail: error,
         url: requestContext.url
@@ -386,6 +389,10 @@ function extractErrorMessage(detail: unknown): string | null {
 
   if ('message' in detail && typeof detail.message === 'string' && detail.message.trim()) {
     return detail.message.trim()
+  }
+
+  if ('error' in detail && typeof detail.error === 'string' && detail.error.trim()) {
+    return detail.error.trim()
   }
 
   if ('detail' in detail) {

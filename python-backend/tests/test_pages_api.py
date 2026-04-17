@@ -19,6 +19,7 @@ from app.api.pages import router as pages_router
 from app.api.projects import router as projects_router
 from app.config import Settings, get_settings
 from app.db import get_db_session
+from app.main import register_exception_handlers
 from app.models import PageVersion, ProjectPage, UploadedFile
 from app.models.enums import FileParseStatus, PageStatus
 from app.schemas import (
@@ -686,6 +687,7 @@ def build_test_app(
     app = FastAPI()
     app.state.sse_manager = SSEManager()
     app.state.thumbnail_service = thumbnail_service or NoopThumbnailService(settings=settings)
+    register_exception_handlers(app)
     app.include_router(projects_router)
     app.include_router(pages_router)
 
